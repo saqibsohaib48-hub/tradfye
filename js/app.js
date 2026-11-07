@@ -3,7 +3,7 @@
 'use strict';
 const OF = window.OF, C = OF.C, el = OF.el, ui = OF.ui, LS = OF.LS, $ = id => document.getElementById(id);
 const ORDER = ['chart', 'heatmap', 'footprint', 'whales', 'profile', 'tpo', 'gamma', 'tape', 'liquidity', 'futures', 'sentiment', 'plan', 'guide'];
-OF.app = { tf: LS.get('tf', '1m'), lines: Object.assign({ plan: true, gamma: false, liq: true, walls: true }, LS.get('lines', {})), view: LS.get('view', 'heatmap'), panel: LS.get('panel', window.innerWidth > 1000) };
+OF.app = { tf: LS.get('tf', '1m'), lines: Object.assign({ plan: true, gamma: false, liq: true, walls: true, key: true }, LS.get('lines', {})), view: LS.get('view', 'heatmap'), panel: LS.get('panel', window.innerWidth > 1000) };
 const A = OF.app;
 
 /* ---------- header ---------- */
@@ -13,7 +13,7 @@ function buildHeader() {
   const ls = $('linesSeg'); ls.innerHTML = '';
   const g = el('div', 'grp'); g.appendChild(el('span', 'lbl', 'Lines'));
   const s = el('div', 'seg');
-  [['plan', 'Plan', 'Decision panel trigger levels'], ['walls', 'Walls', 'Biggest resting bid / ask walls in the order book (±3%) with price and size'], ['liq', 'Liq', 'Estimated liquidation clusters with price and size'], ['gamma', 'Γ', 'Options gamma levels (Deribit)']].forEach(([k, t, title]) => {
+  [['key', '★ Key', 'Auto-highlighted key support / resistance where several sources agree'], ['plan', 'Plan', 'Decision panel trigger levels'], ['walls', 'Walls', 'Biggest resting bid / ask walls in the order book (±3%) with price and size'], ['liq', 'Liq', 'Estimated liquidation clusters with price and size'], ['gamma', 'Γ', 'Options gamma levels (Deribit)']].forEach(([k, t, title]) => {
     const b = el('button', A.lines[k] ? 'on' : '', t); b.title = title;
     b.onclick = () => { A.lines[k] = !A.lines[k]; b.classList.toggle('on', A.lines[k]); LS.set('lines', A.lines); if (k === 'gamma' && A.lines[k]) OF.loadGamma(); };
     s.appendChild(b);
@@ -149,12 +149,35 @@ function renderMtf() {
   box.innerHTML = `<span class="lbl">Market direction</span>${m.rows.map(chip).join('')}<span class="mchip ov ${oc}" title="Weighted: 1m 0.5 · 5m 0.8 · 15m 1 · 1h 1.2 · 4h 1.2 · 12h 1"><b>Overall</b> ${ow} <span class="mono">${o == null ? '' : Math.abs(o)}</span></span><span class="muted sm">${m.up}▲ ${m.dn}▼ · ${msg}</span>`;
 }
 
+/* ---------- key points strip (plain-language read, every tab) ---------- */
+function renderKeyRead() {
+  const box = $('keyread'), k = OF.keyRead(), open = LS.get('krOpen', true);
+  if (!k) { box.innerHTML = '<div class="krmini muted">Key points: collecting candles and order book…</div>'; return; }
+  const fp = OF.fp, pct = p => ((p / k.px - 1) * 100).toFixed(2) + '%';
+  const tcls = k.trend === 'UP' ? 'up' : k.trend === 'DOWN' ? 'dn' : 'flat', tword = k.trend === 'UP' ? '▲ UPTREND' : k.trend === 'DOWN' ? '▼ DOWNTREND' : '◆ RANGE';
+  const pcls = k.pside === 'BUYERS' ? 'up' : k.pside === 'SELLERS' ? 'dn' : 'flat';
+  const lvl = (z, kind) => z ? `<div class="krv mono">${fp(z.p)} <small>${pct(z.p)}</small>${z.fake ? ' <span class="y" title="A wall here keeps getting pulled — may be fake">⚠</span>' : ''}</div><div class="krs">${z.src.slice(0, 4).join(' · ')}</div>` : `<div class="krv muted">none within 2%</div>`;
+  if (!open) {
+    box.innerHTML = `<div class="krmini"><button class="krt" title="Show key points">▸ Key points</button> <b class="${tcls}">${tword}</b> · pressure <b class="${pcls}">${k.pside}</b> · <span class="r">R ${k.res ? fp(k.res.p) : '—'}</span> · <span class="g">S ${k.sup ? fp(k.sup.p) : '—'}</span> · <span class="muted">${k.lean}</span></div>`;
+  } else {
+    box.innerHTML = `<div class="kr">
+      <button class="krt" title="Hide key points">▾</button>
+      <div class="krc ${tcls}"><div class="krh">TODAY’S TREND</div><div class="krv">${tword}</div><div class="krs">${k.trendWhy.join(' · ')}</div></div>
+      <div class="krc ${pcls}"><div class="krh">PRESSURE NOW</div><div class="krv">${k.pside} <small>${Math.round(k.buyShare * 100)}% buys (5 min)</small></div><div class="kbar"><i style="width:${Math.round(k.buyShare * 100)}%"></i></div></div>
+      <div class="krc res"><div class="krh">★ KEY RESISTANCE (sellers’ line)</div>${lvl(k.res)}</div>
+      <div class="krc sup"><div class="krh">★ KEY SUPPORT (buyers’ line)</div>${lvl(k.sup)}</div>
+      <div class="krc wide ${k.leanCls}"><div class="krh">WHAT IT MEANS</div><div class="krl">${k.lean}</div><div class="krs">${k.brk}</div>${k.inside ? `<div class="krs y">⚑ Price is sitting ON a key zone ${fp(k.inside.p)} (${k.inside.src.slice(0, 3).join(', ')}) — expect a reaction here.</div>` : k.where ? `<div class="krs y">${k.where}</div>` : ''}</div>
+    </div>`;
+  }
+  box.querySelector('.krt').onclick = () => { LS.set('krOpen', !open); renderKeyRead(); };
+}
+
 /* ---------- loop ---------- */
 let n = 0;
 function tick(force) {
   n++;
   const S = OF.S; if (!S) return;
-  if (force || n % 4 === 0) { try { OF.lastDecision = OF.decision(); } catch (e) { console.error(e); } updateHeader(); try { renderMtf(); } catch (e) { console.error(e); } }
+  if (force || n % 4 === 0) { try { OF.lastDecision = OF.decision(); } catch (e) { console.error(e); } updateHeader(); try { renderMtf(); } catch (e) { console.error(e); } try { renderKeyRead(); } catch (e) { console.error(e); } }
   const v = cur; if (!v) return;
   const isCanvas = !!v.c;
   if (force || isCanvas || n % 2 === 0) { ui.lblReset(); try { v.render(); } catch (e) { console.error(e); } }

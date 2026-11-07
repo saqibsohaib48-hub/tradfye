@@ -487,3 +487,108 @@ OF.views.plan = {
   }
 };
 })();
+
+/* ===================== KEY POINTS (plain-language market read, shown on every tab) =====================
+   Key levels = zones where several day-trading sources agree: real book walls (weighted by size and how long
+   they have stood; pulled-again-and-again walls are down-weighted and flagged), today's POC / VAH / VAL, VWAP,
+   today's open, yesterday's high / low / POC, 15m and 1h swings, liquidation clusters, round numbers. */
+(function () {
+const OF = window.OF, C = OF.C, ui = OF.ui;
+function wallStand(p) {
+  const S = OF.S, bin = S.bin; if (!bin) return 0; let since = OF.now(), ref = null; const j0 = Math.floor(p / bin);
+  for (let i = S.cols.length - 1; i >= 0; i--) { const c = S.cols[i], j = j0 - c.b0, v = (c.arr[j] || 0) + (c.arr[j - 1] || 0) + (c.arr[j + 1] || 0); if (ref == null) ref = v; if (!ref || v < ref * 0.5) break; since = c.t; }
+  return (OF.now() - since) / 1000;
+}
+function pullsNear(p, w) { const S = OF.S, t0 = OF.now() - 300000; let n = 0; for (let i = S.events.length - 1; i >= 0 && S.events[i].t > t0; i--) { const e = S.events[i]; if (e.type === 'pull' && Math.abs(e.p - p) <= w) n++; } return n; }
+function pivots(k, lb, look) { const hi = [], lo = []; for (let i = Math.max(lb, k.length - look); i < k.length - lb; i++) { let h = true, l = true; for (let j = i - lb; j <= i + lb; j++) { if (j === i) continue; if (k[j].h >= k[i].h) h = false; if (k[j].l <= k[i].l) l = false; } if (h) hi.push(k[i].h); if (l) lo.push(k[i].l); } return { hi, lo }; }
+function zonesOf(lv, px, atr) {
+  lv.sort((a, b) => a.p - b.p); const zs = [];
+  for (const l of lv) { const z = zs[zs.length - 1]; if (z && l.p - z.hi < atr * 0.35) { z.hi = Math.max(z.hi, l.p); z.pw += l.p * l.w; z.w += l.w; z.src.push(l.src); z.fake = z.fake || l.fake; } else zs.push({ lo: l.p, hi: l.p, pw: l.p * l.w, w: l.w, src: [l.src], fake: !!l.fake }); }
+  zs.forEach(z => { z.p = z.pw / z.w; z.src = [...new Set(z.src)]; }); return zs;
+}
+OF.keyRead = function () {
+  const S = OF.S; if (!S || !S.info || !S.last) return null;
+  if (S._kr && Date.now() - S._kr.at < 3000) return S._kr;
+  const k15 = S.k['15m'], k1h = S.k['1h'], kd = S.k['1d']; if (!k15 || k15.length < 30 || !k1h || k1h.length < 30) return null;
+  const px = S.last, atr = OF.atr(k15) || px * 0.002, ss = OF.session(), now = OF.now();
+  const met = OF.meters(), M = {}; if (met) for (const m of met.list) M[m.key] = m;
+  const mt = OF.mtf(), T = {}; if (mt) for (const r of mt.rows) T[r.tf] = r.score;
+  const lv = [], add = (p, w, src, fake) => { if (p && isFinite(p) && Math.abs(p / px - 1) < 0.02) lv.push({ p, w, src, fake }); };
+  if (S.synced) {
+    const bb = OF.bookBins(1, OF.niceStep(px * 0.0002)), ws = [];
+    for (const [p, n] of bb.b) ws.push({ p: p + bb.bin / 2, n, side: 'bid' }); for (const [p, n] of bb.a) ws.push({ p: p + bb.bin / 2, n, side: 'ask' });
+    ws.sort((a, b) => b.n - a.n); const mx = ws.length ? ws[0].n : 1;
+    for (const w of ws.slice(0, 10)) {
+      const st = wallStand(w.p), pu = pullsNear(w.p, bb.bin * 1.5), fake = pu >= 3;
+      let wt = 1 + 2 * w.n / mx; if (st > 120) wt *= 1.3; if (fake) wt *= 0.4;
+      add(w.p, wt, `${w.side} wall ${OF.fmtUsd(w.n)}${st > 60 ? ' (standing ' + (st < 120 ? Math.round(st) + 's' : Math.round(st / 60) + 'm') + ')' : ''}${fake ? ' — pulled ' + pu + '×, may be fake' : ''}`, fake);
+    }
+  }
+  if (ss) {
+    if (ss.today) { add(ss.today.poc, 1.6, 'today POC'); add(ss.today.vah, 1.3, 'today VAH'); add(ss.today.val, 1.3, 'today VAL'); }
+    if (ss.vwap) add(ss.vwap, 1.4, 'VWAP');
+    if (ss.prev) add(ss.prev.poc, 1, 'yesterday POC');
+    if (S.day && S.day.prev.length) { let h = -Infinity, l = Infinity; for (const c of S.day.prev) { h = Math.max(h, c.h); l = Math.min(l, c.l); } add(h, 1.6, 'yesterday high'); add(l, 1.6, 'yesterday low'); }
+  }
+  const dOpen = kd && kd.length ? kd[kd.length - 1].o : null; add(dOpen, 0.9, 'today open');
+  const p15 = pivots(k15, 3, 120), p1 = pivots(k1h, 2, 80);
+  p15.hi.slice(-5).forEach(p => add(p, 1, '15m swing high')); p15.lo.slice(-5).forEach(p => add(p, 1, '15m swing low'));
+  p1.hi.slice(-5).forEach(p => add(p, 1.5, '1h swing high')); p1.lo.slice(-5).forEach(p => add(p, 1.5, '1h swing low'));
+  const lm = OF.liqMap(); if (lm) lm.rows.slice().sort((a, b) => (b.long + b.short) - (a.long + a.short)).slice(0, 6).forEach(r => add(r.p + lm.bin / 2, 1.2, (r.p > lm.mid ? 'short' : 'long') + ' liquidations ' + OF.fmtUsd(r.long + r.short)));
+  const rs = OF.niceStep(px * 0.005); for (let j = -2; j <= 2; j++) add((Math.round(px / rs) + j) * rs, 0.5, 'round number');
+  const zs = zonesOf(lv, px, atr);
+  const above = zs.filter(z => z.lo > px).sort((a, b) => a.p - b.p), below = zs.filter(z => z.hi < px).sort((a, b) => b.p - a.p);
+  const pick = (list, min) => list.find(z => z.w >= min && !(z.fake && z.src.length === 1)) || list.find(z => z.w >= min) || list[0] || null;
+  const res = pick(above, 2.2), sup = pick(below, 2.2);
+  const res2 = res ? pick(above.filter(z => z.lo > res.hi + atr * 0.3), 1.8) : null, sup2 = sup ? pick(below.filter(z => z.hi < sup.lo - atr * 0.3), 1.8) : null;
+  const inside = zs.find(z => z.lo - atr * 0.1 <= px && z.hi + atr * 0.1 >= px && z.w >= 2.2) || null;
+
+  // today's trend
+  const why = []; let ts = 0;
+  if (ss && ss.vwap) { const a = px > ss.vwap; ts += a ? 0.3 : -0.3; why.push((a ? 'above' : 'below') + ' VWAP ' + OF.fp(ss.vwap)); }
+  if (dOpen) { const a = px > dOpen; ts += a ? 0.25 : -0.25; why.push((a ? 'above' : 'below') + ' today’s open ' + OF.fp(dOpen) + ' (' + ((px / dOpen - 1) * 100).toFixed(2) + '%)'); }
+  if (T['1h'] != null) { ts += OF.clamp(T['1h'] / 100, -1, 1) * 0.25; why.push('1h ' + (T['1h'] > 15 ? 'up' : T['1h'] < -15 ? 'down' : 'flat')); }
+  if (T['4h'] != null) { ts += OF.clamp(T['4h'] / 100, -1, 1) * 0.2; why.push('4h ' + (T['4h'] > 15 ? 'up' : T['4h'] < -15 ? 'down' : 'flat')); }
+  const trend = ts > 0.35 ? 'UP' : ts < -0.35 ? 'DOWN' : 'RANGE';
+  // pressure now
+  const f5 = OF.flow(now - 300000), f1 = OF.flow(now - 60000), imb = M.imb ? M.imb.score / 100 : 0;
+  const pr = OF.clamp(0.4 * (f5.tot ? f5.d / f5.tot : 0) * 2 + 0.3 * (f1.tot ? f1.d / f1.tot : 0) * 2 + 0.3 * imb, -1, 1);
+  const pside = pr > 0.15 ? 'BUYERS' : pr < -0.15 ? 'SELLERS' : 'BALANCED', buyShare = f5.tot ? f5.b / f5.tot : 0.5;
+  // what it means
+  const fp = OF.fp, rTop = res ? res.hi : null, sBot = sup ? sup.lo : null;
+  let lean, leanCls;
+  if (trend === 'UP' && pside !== 'SELLERS') { lean = `Lean LONG — trend and pressure agree. Better entries are dips toward support ${sup ? fp(sup.p) : '—'}; idea is wrong below ${sBot ? fp(sBot) : '—'}.`; leanCls = 'up'; }
+  else if (trend === 'DOWN' && pside !== 'BUYERS') { lean = `Lean SHORT — trend and pressure agree. Better entries are rallies into resistance ${res ? fp(res.p) : '—'}; idea is wrong above ${rTop ? fp(rTop) : '—'}.`; leanCls = 'dn'; }
+  else if (trend === 'RANGE') { lean = `RANGE day — no trend. Play the edges only if the wall holds: buy near ${sup ? fp(sup.p) : '—'}, sell near ${res ? fp(res.p) : '—'}; avoid the middle.`; leanCls = 'flat'; }
+  else { lean = `MIXED — today’s trend is ${trend === 'UP' ? 'up' : 'down'} but ${pside.toLowerCase()} are pushing right now. Wait for a break of ${rTop ? fp(rTop) : '—'} or ${sBot ? fp(sBot) : '—'}.`; leanCls = 'flat'; }
+  const brk = `Above <b>${rTop ? fp(rTop) : '—'}</b> → buyers take control, next ${res2 ? fp(res2.p) : rTop ? fp(rTop + atr * 2) : '—'} · Below <b>${sBot ? fp(sBot) : '—'}</b> → sellers take control, next ${sup2 ? fp(sup2.p) : sBot ? fp(sBot - atr * 2) : '—'}`;
+  const where = inside ? `Price is sitting ON a key zone (${fp(inside.p)}) — expect a reaction here.` : res && sup ? `Price is ${Math.abs(res.p - px) < Math.abs(px - sup.p) ? 'closer to resistance' : 'closer to support'}.` : '';
+  S._kr = { at: Date.now(), px, atr, zones: zs, res, sup, res2, sup2, inside, trend, trendWhy: why, ts, pressure: pr, pside, buyShare, lean, leanCls, brk, where };
+  return S._kr;
+};
+
+/* Draw the key levels as highlighted bands with plain labels (heatmap, columns, charts). */
+OF.drawKeyLevels = (ctx, x0, x1, Y, lo, hi) => {
+  if (!OF.app.lines.key) return;
+  const k = OF.keyRead(); if (!k) return;
+  const band = (z, kind, label, strong) => {
+    if (!z) return;
+    const col = kind === 'res' ? '239,68,68' : kind === 'at' ? '245,158,11' : '34,197,94';
+    if (z.hi < lo || z.lo > hi) {   // off screen: say where it is
+      if (!strong) return;
+      const up = z.lo > hi; ctx.font = 'bold 11px ui-monospace,Menlo,monospace'; ctx.fillStyle = `rgb(${col})`; ctx.textAlign = 'left'; ctx.textBaseline = up ? 'top' : 'bottom';
+      ctx.fillText(`${up ? '↑' : '↓'} ${label} ${OF.fp(z.p)} (${((z.p / k.px - 1) * 100).toFixed(2)}%, off chart)`, x0 + 290, up ? Y(hi) + 4 : Y(lo) - 4); return;
+    }
+    const pad = k.atr * 0.05, y1 = Y(z.hi + pad), y2 = Y(z.lo - pad);
+    ctx.fillStyle = `rgba(${col},${strong ? 0.16 : 0.08})`; ctx.fillRect(x0, y1, x1 - x0, Math.max(3, y2 - y1));
+    ctx.strokeStyle = `rgba(${col},${strong ? 0.95 : 0.5})`; ctx.lineWidth = strong ? 2 : 1; ctx.setLineDash(strong ? [] : [4, 4]);
+    ctx.beginPath(); ctx.moveTo(x0, Math.round(Y(z.p)) + .5); ctx.lineTo(x1, Math.round(Y(z.p)) + .5); ctx.stroke(); ctx.setLineDash([]); ctx.lineWidth = 1;
+    ctx.font = 'bold 11px ui-monospace,Menlo,monospace'; const t = `${label} ${OF.fp(z.p)}${z.fake ? ' ⚠' : ''}`, w = ctx.measureText(t).width + 12, ly = Y(z.p);
+    ctx.fillStyle = `rgb(${col})`; ctx.fillRect(x0 + 4, ly - 9, w, 18); ctx.fillStyle = '#000'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle'; ctx.fillText(t, x0 + 10, ly);
+    if (strong) { ctx.font = '10px ui-monospace,monospace'; ctx.fillStyle = `rgb(${col})`; ctx.fillText(z.src.slice(0, 3).join(' · '), x0 + w + 10, ly + (kind === 'res' ? -12 : kind === 'at' ? 0 : 12)); }
+  };
+  band(k.inside, 'at', '★ KEY LEVEL — price is here', true);
+  band(k.res, 'res', '★ KEY RESISTANCE', true); band(k.sup, 'sup', '★ KEY SUPPORT', true);
+  band(k.res2, 'res', 'next resistance', false); band(k.sup2, 'sup', 'next support', false);
+};
+})();

@@ -293,6 +293,7 @@ OF.views.heatmap = {
     if (OF.app.lines.walls) OF.drawWallLines(ctx, pw, Y, lo, hi);
     // columns
     if (list.length) drawColumns(ctx, pw, TOP, ph, lo, hi, rb, Y, list, o, this.mouse);
+    ctx.save(); ctx.beginPath(); ctx.rect(0, TOP, pw + cw, ph); ctx.clip(); OF.drawKeyLevels(ctx, 0, pw + cw, Y, lo, hi); ctx.restore();
     // axes
     ctx.fillStyle = C.bg; ctx.fillRect(pw + cw, 0, AX, TOP);
     ui.priceAxis(ctx, pw + cw, pw + cw, TOP, ph, lo, hi);
@@ -411,6 +412,7 @@ OF.views.chart = {
     if (OF.app.lines.plan) OF.drawPlanLines(ctx, pw, Y, lo, hi);
     if (OF.app.lines.liq) OF.drawLiqLines(ctx, pw, Y, lo, hi);
     if (OF.app.lines.walls) OF.drawWallLines(ctx, pw, Y, lo, hi);
+    OF.drawKeyLevels(ctx, 0, pw, Y, lo, hi);
     // drawings
     const draws = LS.get('draw:' + S.symbol, []).concat(this.draft ? [this.draft] : []);
     ctx.strokeStyle = '#e5e7eb'; ctx.lineWidth = 1.2;
@@ -545,6 +547,7 @@ OF.views.footprint = {
     const ss = OF.session(), fmtV = (n, q) => o.units === '$' ? OF.fmtUsd(n).replace('$', '') : (q >= 100 ? q.toFixed(0) : q >= 1 ? q.toFixed(2) : q.toFixed(3));
     if (ss && ss.prev) [['prev day VAH', ss.prev.vah, C.blue], ['prev day VAL', ss.prev.val, C.blue], ['prev day POC', ss.prev.poc, C.yellow]].forEach(([t, p, col]) => { if (p > lo && p < hi) ui.hline(ctx, 0, pw, Y(p), col, [2, 4], t + ' ' + OF.fp(p)); });
     if (OF.app.lines.plan) OF.drawPlanLines(ctx, pw, Y, lo, hi);
+    OF.drawKeyLevels(ctx, 0, pw, Y, lo, hi);
     let imbTxt = '';
     ctx.textBaseline = 'middle';
     cs.forEach((cd, i) => {
@@ -680,6 +683,7 @@ OF.views.whales = {
     if (OF.app.lines.gamma) OF.drawGammaLines(ctx, pw, Y, lo, hi);
     if (OF.app.lines.liq) OF.drawLiqLines(ctx, pw, Y, lo, hi);
     if (OF.app.lines.walls) OF.drawWallLines(ctx, pw, Y, lo, hi);
+    OF.drawKeyLevels(ctx, 0, pw, Y, lo, hi);
     // whale volume by price on the right
     if (o.vp) {
       const zb = OF.niceStep((hi - lo) / 50), zm = new Map(); for (const w of d.list) { const kk = Math.floor(w.p / zb) * zb; const r = zm.get(kk) || [0, 0]; r[w.buy ? 0 : 1] += w.n; zm.set(kk, r); }

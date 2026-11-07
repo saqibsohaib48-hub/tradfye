@@ -5,6 +5,7 @@ A single-page terminal that runs entirely in your browser from free public excha
 **Tabs:** Chart · Heatmap · Footprint · Whales · Vol profile · TPO · Gamma · Tape · L3 events · Futures · Sentiment · **Trade plan** · Guide
 **Lines (header):** Plan · Walls (biggest order-book walls with price) · Liq (estimated liquidation clusters with price) · Γ (options gamma levels)
 **Mouse:** move over any chart or its price scale to read the exact price and % distance from the current price.
+**Key points (every tab):** today's trend (up / down / range and why), who is pushing right now, the ★ key resistance and ★ key support (zones where several sources agree, with fake-wall warnings), and a plain-language "what it means" with the break-above / break-below levels. The same key levels are auto-highlighted on the heatmap, its columns and the charts (toggle: Lines → ★ Key).
 **Right panel:** Decision (BUY / SELL / WAIT from the order-flow meters, with trigger levels) + DOM ladder + mini tape.
 **Keys:** `1`–`9`, `0` switch tabs · `P` shows / hides the right panel.
 
