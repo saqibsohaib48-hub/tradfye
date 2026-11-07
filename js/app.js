@@ -75,6 +75,7 @@ function buildTabs() {
     b.onclick = () => setView(id); t.appendChild(b);
   });
 }
+OF.app.remount = () => mountView();
 function setView(id) { A.view = id; LS.set('view', id); buildTabs(); mountView(); }
 let cur = null;
 function mountView() {

@@ -20,6 +20,73 @@ function pivots(k, lb, look) {
 }
 const clamp1 = v => OF.clamp(v, -1, 1);
 
+
+/* Merge raw levels (price, weight, source) into zones; nearby levels within mergeK × ATR join. */
+function makeZones(lv, px, atr, mergeK) {
+  lv.sort((a, b) => a.p - b.p);
+  const zones = [];
+  for (const l of lv) {
+    const z = zones[zones.length - 1];
+    if (z && l.p - z.hi < atr * mergeK) { z.hi = Math.max(z.hi, l.p); z.pw += l.p * l.w; z.w += l.w; z.src.push(l.src); }
+    else zones.push({ lo: l.p, hi: l.p, pw: l.p * l.w, w: l.w, src: [l.src] });
+  }
+  zones.forEach(z => { z.p = z.pw / z.w; z.src = [...new Set(z.src)]; });
+  return { zones, sup: zones.filter(z => z.hi < px - atr * 0.05).sort((a, b) => b.p - a.p), res: zones.filter(z => z.lo > px + atr * 0.05).sort((a, b) => a.p - b.p) };
+}
+/* Entry at the strongest nearby zone on our side, stop beyond it, targets at the next opposing zones. */
+function buildPlan(dir, px, atr, sup, res, c) {
+  const strong = z => z.w >= 2.5, near = dir > 0 ? sup : res, far = dir > 0 ? res : sup;
+  let best = null;
+  for (const z of near) { const d = Math.abs(z.p - px) / atr; if (d > c.near) break; const sc = z.w / (1 + d); if (!best || sc > best.sc) best = { z, sc, d }; }
+  let entry, eType, base;
+  if (best) { base = best.z; entry = dir > 0 ? base.hi : base.lo; eType = Math.abs(entry - px) < atr * 0.2 ? 'market' : 'limit'; if (eType === 'market') entry = px; }
+  else { entry = px; eType = 'market'; base = near[0] || null; }
+  let stop = base ? (dir > 0 ? base.lo - atr * c.buf : base.hi + atr * c.buf) : entry - dir * atr * (c.minR + c.maxR) / 2;
+  let risk = Math.abs(entry - stop);
+  if (risk < atr * c.minR) { stop = entry - dir * atr * c.minR; risk = atr * c.minR; }
+  if (risk > atr * c.maxR) { stop = entry - dir * atr * c.maxR; risk = atr * c.maxR; }
+  const tz = far.filter(z => dir > 0 ? z.lo > entry + risk * 0.8 : z.hi < entry - risk * 0.8);
+  const edge = z => dir > 0 ? z.lo - atr * 0.05 : z.hi + atr * 0.05;
+  const tp1z = tz.find(z => Math.abs(edge(z) - entry) >= risk) || null;
+  let tp1 = tp1z ? edge(tp1z) : entry + dir * risk * c.tp1R;
+  if (Math.abs(tp1 - entry) > atr * c.tp1Cap) tp1 = entry + dir * risk * c.tp1R;
+  const beyond = z => dir > 0 ? edge(z) > tp1 + atr * c.step : edge(z) < tp1 - atr * c.step;
+  const tp2z = tz.find(z => beyond(z) && strong(z)) || tz.find(beyond);
+  let tp2 = tp2z ? edge(tp2z) : entry + dir * risk * c.tp2R;
+  if (Math.abs(tp2 - entry) > atr * c.tp2Cap) tp2 = entry + dir * risk * c.tp2R;
+  const blocker = far.find(z => strong(z) && (dir > 0 ? z.lo > entry && z.lo < tp1 : z.hi < entry && z.hi > tp1));
+  return { dir, entry, eType, stop, risk, tp1, tp2, rr1: Math.abs(tp1 - entry) / risk, rr2: Math.abs(tp2 - entry) / risk, base, tp1z, tp2z, blocker,
+    trigger: dir > 0 ? (res[0] ? res[0].hi : px + atr) : (sup[0] ? sup[0].lo : px - atr) };
+}
+/* Measured hit rate: replay the same kind of setup on past candles.
+   Signal = EMA9 vs EMA21 in our direction, close on our side of EMA50, last-5-candle taker delta in our direction.
+   Each signal: enter at close, stop = same ATR multiple as the live plan, TP1/TP2 at the live plan's R multiples,
+   half off at TP1 then stop to entry. A candle touching both stop and TP1 counts as a loss (conservative). */
+function backtest(k, dir, rATR, rr1, rr2, maxBars, label) {
+  if (!k || k.length < 120 || !(rATR > 0)) return null;
+  const e9 = OF.ema(k, 9), e21 = OF.ema(k, 21), e50 = OF.ema(k, 50), atr = new Array(k.length);
+  let a = null; for (let i = 1; i < k.length; i++) { const tr = Math.max(k[i].h - k[i].l, Math.abs(k[i].h - k[i - 1].c), Math.abs(k[i].l - k[i - 1].c)); a = a == null ? tr : (a * 13 + tr) / 14; atr[i] = a; }
+  let w1 = 0, w2 = 0, loss = 0, to = 0, sumR = 0;
+  for (let i = 60; i < k.length - 2;) {
+    let d5 = 0; for (let j = i - 4; j <= i; j++) d5 += 2 * k[j].bqv - k[j].qv;
+    const sig = dir > 0 ? e9[i] > e21[i] && k[i].c > e50[i] && d5 > 0 : e9[i] < e21[i] && k[i].c < e50[i] && d5 < 0;
+    if (!sig) { i++; continue; }
+    const en = k[i].c, R = rATR * atr[i], st = en - dir * R, t1 = en + dir * R * rr1, t2 = en + dir * R * rr2;
+    let res = null, hit1 = false, j = i + 1;
+    for (; j < k.length && j <= i + maxBars; j++) {
+      const c = k[j], hi = dir > 0 ? c.h : -c.l, lo = dir > 0 ? c.l : -c.h, S_ = dir * st, T1 = dir * t1, T2 = dir * t2, EN = dir * en;
+      if (!hit1) { if (lo <= S_) { res = 'loss'; break; } if (hi >= T1) { hit1 = true; if (hi >= T2) { res = 'w2'; break; } continue; } }
+      else { if (hi >= T2) { res = 'w2'; break; } if (lo <= EN) { res = 'w1'; break; } }
+    }
+    if (!res) res = hit1 ? 'w1' : 'to';
+    if (res === 'loss') { loss++; sumR -= 1; } else if (res === 'w1') { w1++; sumR += rr1 / 2; } else if (res === 'w2') { w2++; sumR += (rr1 + rr2) / 2; } else to++;
+    i = j + 1;
+  }
+  const decided = w1 + w2 + loss, n = decided + to;
+  if (!decided) return { n: 0, label };
+  return { n, decided, win: (w1 + w2) / decided, w2: w2 / decided, loss: loss / decided, to, exp: sumR / n, be: 1 / (1 + rr1 / 2), label };
+}
+
 OF.tradePlan = function () {
   const S = OF.S; if (!S || !S.info) return { wait: 'Loading…' };
   const k1 = S.k['1h'], k4 = S.k['4h'];
@@ -100,42 +167,9 @@ OF.tradePlan = function () {
     if (wb) add(wbp / wb, 0.8, 'whale buyers avg'); if (ws) add(wsp / ws, 0.8, 'whale sellers avg');
   }
   const rs = OF.niceStep(px * 0.01); add(Math.round(px / rs) * rs, 0.5, 'round number'); add((Math.round(px / rs) + 1) * rs, 0.5, 'round number'); add((Math.round(px / rs) - 1) * rs, 0.5, 'round number');
-  lv.sort((a, b) => a.p - b.p);
-  const zones = [];
-  for (const l of lv) {
-    const z = zones[zones.length - 1];
-    if (z && l.p - z.hi < atr * 0.25) { z.hi = Math.max(z.hi, l.p); z.pw += l.p * l.w; z.w += l.w; z.src.push(l.src); }
-    else zones.push({ lo: l.p, hi: l.p, pw: l.p * l.w, w: l.w, src: [l.src] });
-  }
-  zones.forEach(z => { z.p = z.pw / z.w; z.src = [...new Set(z.src)]; });
-  const sup = zones.filter(z => z.hi < px - atr * 0.05).sort((a, b) => b.p - a.p);
-  const res = zones.filter(z => z.lo > px + atr * 0.05).sort((a, b) => a.p - b.p);
+  const { zones, sup, res } = makeZones(lv, px, atr, 0.25);
   const strong = z => z.w >= 2.5;
-
-  /* ---------- 3. plan ---------- */
-  const build = dir => {
-    const near = dir > 0 ? sup : res, far = dir > 0 ? res : sup;
-    let best = null;
-    for (const z of near) { const d = Math.abs(z.p - px) / atr; if (d > 1.6) break; const sc = z.w / (1 + d); if (!best || sc > best.sc) best = { z, sc, d }; }
-    let entry, eType, base;
-    if (best) { base = best.z; entry = dir > 0 ? base.hi : base.lo; eType = Math.abs(entry - px) < atr * 0.2 ? 'market' : 'limit'; if (eType === 'market') entry = px; }
-    else { entry = px; eType = 'market'; base = near[0] || null; }
-    let stop = base ? (dir > 0 ? base.lo - atr * 0.25 : base.hi + atr * 0.25) : entry - dir * atr * 1.2;
-    let risk = Math.abs(entry - stop);
-    if (risk < atr * 0.6) { stop = entry - dir * atr * 0.6; risk = atr * 0.6; }
-    if (risk > atr * 2) { stop = entry - dir * atr * 2; risk = atr * 2; }
-    const tz = far.filter(z => dir > 0 ? z.lo > entry + risk * 0.8 : z.hi < entry - risk * 0.8);
-    const edge = z => dir > 0 ? z.lo - atr * 0.05 : z.hi + atr * 0.05;
-    const tp1z = tz.find(z => Math.abs(edge(z) - entry) >= risk) || null;
-    let tp1 = tp1z ? edge(tp1z) : entry + dir * risk * 1.5;
-    if (Math.abs(tp1 - entry) > atr * 4) tp1 = entry + dir * risk * 1.5;
-    const tp2z = tz.find(z => (dir > 0 ? edge(z) > tp1 + atr * 0.3 : edge(z) < tp1 - atr * 0.3) && strong(z)) || tz.find(z => dir > 0 ? edge(z) > tp1 + atr * 0.3 : edge(z) < tp1 - atr * 0.3);
-    let tp2 = tp2z ? edge(tp2z) : entry + dir * risk * 3;
-    if (Math.abs(tp2 - entry) > atr * 6) tp2 = entry + dir * risk * 3;
-    const blocker = far.find(z => strong(z) && (dir > 0 ? z.lo > entry && z.lo < tp1 : z.hi < entry && z.hi > tp1));
-    return { dir, entry, eType, stop, risk, tp1, tp2, rr1: Math.abs(tp1 - entry) / risk, rr2: Math.abs(tp2 - entry) / risk, base, tp1z, tp2z, blocker,
-      trigger: dir > 0 ? (res[0] ? res[0].hi : px + atr) : (sup[0] ? sup[0].lo : px - atr) };
-  };
+  const build = dir => buildPlan(dir, px, atr, sup, res, { near: 1.6, buf: 0.25, minR: 0.6, maxR: 2, tp1R: 1.5, tp1Cap: 4, tp2R: 3, tp2Cap: 6, step: 0.3 });
   const long = build(1), short = build(-1);
   let side = 0, why = [];
   if (Math.abs(bias) >= 0.2 && agree >= 0.55) side = Math.sign(bias);
@@ -145,8 +179,94 @@ OF.tradePlan = function () {
   if (plan && rsi > 78 && side > 0 && plan.eType === 'market') { why.push('1h RSI is above 78 — wait for the pullback limit instead of buying here'); plan.eType = 'limit'; }
   if (plan && rsi < 22 && side < 0 && plan.eType === 'market') { why.push('1h RSI is below 22 — wait for the bounce limit instead of selling here'); plan.eType = 'limit'; }
   const conf = Math.round(OF.clamp(Math.abs(bias) * 100 * 0.7 + agree * 40 + (plan && plan.base && strong(plan.base) ? 10 : 0), 0, 95));
-  return { at: Date.now(), px, atr, atr4, bias, agree, factors: F, zones, sup, res, long, short, side: plan ? side : 0, plan, why, conf, rsi, recH,
+  const ref = plan || (Math.abs(bias) > 0 ? (bias > 0 ? long : short) : long);
+  const prob = backtest(k1, ref.dir, ref.risk / OF.atr(k1), ref.rr1, ref.rr2, 24, 'last ' + Math.round(k1.length / 24) + ' days of 1h candles');
+  return { at: Date.now(), px, atr, atr4, bias, agree, factors: F, zones, sup, res, long, short, side: plan ? side : 0, plan, why, conf, rsi, recH, prob,
     verdict: plan ? (side > 0 ? 'LONG' : 'SHORT') : 'NO TRADE' };
+};
+
+
+/* ---------- extra 1m history for the scalp backtest (~2 days) ---------- */
+OF.long1m = function () {
+  const S = OF.S, k = S.k['1m']; if (!k || !k.length) return null;
+  if (!S._l1 && !S._l1Loading && !OF.demo) {
+    S._l1Loading = true;
+    (async () => {
+      let end = k[0].t - 1, out = [];
+      for (let i = 0; i < 2; i++) {
+        const rows = await OF.getJ(`/api/v3/klines?symbol=${S.symbol}&interval=1m&endTime=${end}&limit=1000`).catch(() => []);
+        if (!rows.length) break;
+        out = rows.map(r => ({ t: r[0], o: +r[1], h: +r[2], l: +r[3], c: +r[4], v: +r[5], qv: +r[7], bv: +r[9], bqv: +r[10] })).concat(out);
+        end = rows[0][0] - 1;
+      }
+      if (OF.S === S) S._l1 = out;
+    })();
+  }
+  const old = S._l1 || [];
+  return old.length ? old.filter(c => c.t < k[0].t).concat(k.slice(0, -1)) : k.slice(0, -1);
+};
+
+/* ===================== SCALP PLAN (1m–5m) =====================
+   Same idea as the intraday plan but on fast data: 1m/5m/15m direction, live flow, CVD, book imbalance,
+   nearby book walls (only walls that have stood ≥ 60 s and were not repeatedly pulled), 5m ATR for stops.
+   A scalp is CONFIRMED only when 7 of 9 checks pass, including the three key ones. */
+OF.scalpPlan = function () {
+  const S = OF.S; if (!S || !S.info) return { wait: 'Loading…' };
+  const k1 = S.k['1m'], k5 = S.k['5m'];
+  if (!k1 || k1.length < 60 || !k5 || k5.length < 60) { OF.loadKlines('1m'); OF.loadKlines('5m'); return { wait: 'Loading 1m and 5m candles…' }; }
+  if (!S.synced) return { wait: 'Waiting for the live order book…' };
+  const px = S.last || k1[k1.length - 1].c, atr = OF.atr(k5), atr1 = OF.atr(k1);
+  const met = OF.meters(), M = {}; if (met) for (const m of met.list) M[m.key] = m;
+  const mt = OF.mtf(), T = {}; if (mt) for (const r of mt.rows) T[r.tf] = r.score;
+  const ss = OF.session(), now = OF.now();
+  const F = [], fac = (name, w, s, text, group) => F.push({ name, w, s: s == null ? null : clamp1(s), text, group });
+  [['1m', 1], ['5m', 1.5], ['15m', 1.5], ['1h', 0.7]].forEach(([tf, w]) => { if (T[tf] != null) fac(tf + ' direction', w, T[tf] / 100, 'score ' + T[tf], 'Timeframes'); });
+  const mm = (key, w, group) => { const m = M[key]; if (m && m.score != null) fac(m.name, w, m.score / 100, m.text, group); };
+  mm('momentum', 1, 'Flow now'); mm('aggr', 1.5, 'Flow now'); mm('cvd5', 1.2, 'Flow now'); mm('large', 0.8, 'Flow now'); mm('absorb', 0.6, 'Flow now');
+  mm('imb', 1, 'Order book'); mm('walls', 0.6, 'Order book'); mm('fake', 0.6, 'Order book'); mm('faggr', 0.8, 'Futures');
+  let sw = 0, sum = 0; for (const f of F) if (f.s != null) { sum += f.s * f.w; sw += f.w; }
+  const bias = sw ? sum / sw : 0, voting = F.filter(f => f.s != null && Math.abs(f.s) > 0.15);
+  const agree = voting.length ? voting.filter(f => Math.sign(f.s) === Math.sign(bias)).length / voting.length : 0;
+
+  // levels close to price
+  const lv = [], add = (p, w, src) => { if (p && isFinite(p) && Math.abs(p / px - 1) < 0.012) lv.push({ p, w, src }); };
+  const bb = OF.bookBins(0.8, OF.niceStep(px * 0.0002)), walls = [];
+  for (const [p, n] of bb.b) walls.push({ p: p + bb.bin / 2, n, side: 'bid' }); for (const [p, n] of bb.a) walls.push({ p: p + bb.bin / 2, n, side: 'ask' });
+  walls.sort((a, b) => b.n - a.n); const wmx = walls.length ? walls[0].n : 1;
+  walls.slice(0, 12).forEach(w => add(w.p, 0.8 + 2 * w.n / wmx, (w.side === 'bid' ? 'bid wall ' : 'ask wall ') + OF.fmtUsd(w.n)));
+  const p1 = pivots(k1, 3, 180), p5 = pivots(k5, 3, 120);
+  p1.hi.slice(-6).forEach(x => add(x.p, 1, '1m swing high')); p1.lo.slice(-6).forEach(x => add(x.p, 1, '1m swing low'));
+  p5.hi.slice(-6).forEach(x => add(x.p, 1.5, '5m swing high')); p5.lo.slice(-6).forEach(x => add(x.p, 1.5, '5m swing low'));
+  if (ss) { if (ss.vwap) add(ss.vwap, 1.2, 'VWAP'); if (ss.today) { add(ss.today.poc, 1.3, 'today POC'); add(ss.today.vah, 1, 'today VAH'); add(ss.today.val, 1, 'today VAL'); } }
+  const lm = OF.liqMap(); if (lm) lm.rows.forEach(r => add(r.p + lm.bin / 2, 0.8, 'liq cluster ' + OF.fmtUsd(r.long + r.short)));
+  const rs = OF.niceStep(px * 0.002); for (let j = -2; j <= 2; j++) add((Math.round(px / rs) + j) * rs, 0.4, 'round number');
+  const { zones, sup, res } = makeZones(lv, px, atr, 0.3);
+  const cfg = { near: 1.0, buf: 0.2, minR: 0.4, maxR: 1.5, tp1R: 1.2, tp1Cap: 3, tp2R: 2, tp2Cap: 4, step: 0.2 };
+  const long = buildPlan(1, px, atr, sup, res, cfg), short = buildPlan(-1, px, atr, sup, res, cfg);
+  const dir = bias >= 0 ? 1 : -1, pl = dir > 0 ? long : short;
+
+  // confirmation checklist
+  const sc = k => (M[k] && M[k].score != null ? M[k].score : 0) * dir;
+  const wl = OF.walls(0.3), prot = wl && wl[dir > 0 ? 'bid' : 'ask'];
+  const CH = [
+    ['5m and 15m agree', T['5m'] != null && T['5m'] * dir > 15 && (T['15m'] || 0) * dir > -15, `5m ${T['5m']} · 15m ${T['15m']}`, true],
+    ['1h is not strongly against', (T['1h'] || 0) * dir > -55, '1h ' + T['1h'], false],
+    [(dir > 0 ? 'Buyers' : 'Sellers') + ' in control (1 min)', sc('aggr') > 20, M.aggr ? M.aggr.text : '', true],
+    ['CVD 5 min confirms', sc('cvd5') > 10, M.cvd5 ? M.cvd5.text : '', false],
+    ['Book leans our way (±0.1%)', sc('imb') > 0, M.imb ? M.imb.text : '', false],
+    ['Real wall protects the stop', !!(prot && prot.standSec >= 60 && prot.pulls < 3 && Math.abs(prot.p - pl.entry) < atr * 1.2), prot ? `${prot.side || (dir > 0 ? 'bid' : 'ask')} wall ${OF.fmtUsd(prot.n)} at ${OF.fp(prot.p)}, standing ${Math.round(prot.standSec)}s, pulled ${prot.pulls}× nearby` : 'no wall', true],
+    ['Room to TP1 (no strong zone in the way)', !pl.blocker, pl.blocker ? 'zone at ' + OF.fp(pl.blocker.p) : 'clear', false],
+    ['Market not dangerous', !met || met.danger < 66, met ? 'danger ' + Math.round(met.danger) : '', false],
+    ['10-second momentum not against', sc('momentum') > -40, M.momentum ? M.momentum.text : '', false]
+  ].map(([name, ok, text, key]) => ({ name, ok, text, key }));
+  const passed = CH.filter(c => c.ok).length, keyOk = CH.filter(c => c.key).every(c => c.ok);
+  const confirmed = passed >= 7 && keyOk && Math.abs(bias) >= 0.15 && pl.rr1 >= 1;
+  const why = confirmed ? [] : [`${passed}/9 checks pass` + (keyOk ? '' : ' and a key check fails'), ...CH.filter(c => !c.ok).map(c => c.name.toLowerCase())];
+  const hist = OF.long1m();
+  const prob = backtest(hist, dir, pl.risk / atr1, pl.rr1, pl.rr2, 60, 'last ' + (hist ? Math.round(hist.length / 60) : 0) + ' h of 1m candles');
+  const conf = Math.round(OF.clamp(passed / 9 * 60 + Math.abs(bias) * 40, 0, 95));
+  return { at: Date.now(), scalp: true, px, atr, bias, agree, factors: F, zones, sup, res, long, short, plan: confirmed ? pl : null, idea: pl, side: confirmed ? dir : 0,
+    checks: CH, passed, why, conf, prob, verdict: confirmed ? (dir > 0 ? 'LONG SCALP' : 'SHORT SCALP') : 'NO SCALP' };
 };
 
 /* ===================== TRADE PLAN TAB =====================
@@ -154,18 +274,18 @@ OF.tradePlan = function () {
    waiting → active (entry touched) → tp1 (half off, stop to entry) → done / breakeven, or stopped,
    missed (target reached before entry), expired (not filled in 4 h). The analysis below keeps updating. */
 const FINAL = { stopped: 1, done: 1, breakeven: 1, missed: 1, expired: 1 };
-function lockPlan(p, symbol) {
+function lockPlan(p, symbol, expMs, expLabel) {
   const pl = p.plan;
   return { symbol, created: OF.now(), dir: pl.dir, entry: pl.entry, stop: pl.stop, stopNow: pl.stop, tp1: pl.tp1, tp2: pl.tp2, rr1: pl.rr1, rr2: pl.rr2, risk: pl.risk, eType: pl.eType,
     baseSrc: pl.base ? pl.base.src.slice(0, 2) : [], tp1Src: pl.tp1z ? pl.tp1z.src.slice(0, 2) : [], tp2Src: pl.tp2z ? pl.tp2z.src.slice(0, 2) : [],
-    state: pl.eType === 'market' ? 'active' : 'waiting', filledAt: pl.eType === 'market' ? OF.now() : null, events: [], lastT: OF.now(), expires: OF.now() + 4 * 36e5, conf: p.conf };
+    state: pl.eType === 'market' ? 'active' : 'waiting', filledAt: pl.eType === 'market' ? OF.now() : null, events: [], lastT: OF.now(), expires: OF.now() + expMs, expLabel, conf: p.conf, prob: p.prob, scalp: !!p.scalp };
 }
 function step(L, price, t) {
   const d = L.dir, up = x => d > 0 ? price >= x : price <= x, down = x => d > 0 ? price <= x : price >= x;
   if (L.state === 'waiting') {
     if (down(L.entry)) { L.state = 'active'; L.filledAt = t; L.events.push([t, 'Entry filled at ' + OF.fp(L.entry)]); }
     else if (up(L.tp1)) { L.state = 'missed'; L.events.push([t, 'Price reached TP1 before the entry — missed, do not chase']); }
-    else if (t > L.expires) { L.state = 'expired'; L.events.push([t, 'Not filled within 4 h — cancelled']); }
+    else if (t > L.expires) { L.state = 'expired'; L.events.push([t, 'Not filled within ' + (L.expLabel || '4 h') + ' — cancelled']); }
   } else if (L.state === 'active') {
     if (down(L.stopNow)) { L.state = 'stopped'; L.events.push([t, 'Stop hit at ' + OF.fp(L.stopNow) + ' (−1R)']); }
     else if (up(L.tp1)) { L.state = 'tp1'; L.stopNow = L.entry; L.events.push([t, 'TP1 hit — half closed, stop moved to entry']); }
@@ -176,25 +296,29 @@ function step(L, price, t) {
 }
 OF.views.plan = {
   label: 'Trade plan', title: 'Everything combined into one 1h intraday setup — entry, stop, targets, and live status',
-  o: Object.assign({ acct: 1000, risk: 1, full: false, ctf: '1h' }, LS.get('plan', {})),
+  o: Object.assign({ acct: 1000, risk: 1, full: false, ctf: '1h', ctfS: '5m', mode: 'intraday' }, LS.get('plan', {})),
   zv: { n: 72, off: 0 },
   save() { LS.set('plan', this.o); },
   toolbar(tb) {
     const o = this.o;
     const inp = (lab, key, step) => { const w = el('div', 'grp'); w.appendChild(el('span', 'lbl', lab)); const i = el('input', 'num'); i.type = 'number'; i.step = step; i.value = o[key]; i.oninput = () => { o[key] = +i.value || 0; this.save(); this.html(); }; w.appendChild(i); return w; };
+    tb.append(ui.seg('Mode', [['intraday', 'Intraday 1h'], ['scalp', '⚡ Scalp 1–5m']], o.mode, v => { o.mode = v; this.save(); OF.app.remount(); }));
     tb.append(inp('Account $', 'acct', 100), inp('Risk %', 'risk', 0.25));
-    const nb = el('button', 'tgl on', '✚ New plan'); nb.title = 'Discard the current plan and build a fresh one from the latest data'; nb.onclick = () => { this.unlock(); this.p = OF.tradePlan(); this.maybeLock(); this.html(); };
+    const nb = el('button', 'tgl on', '✚ New plan'); nb.title = 'Discard the current plan and build a fresh one from the latest data'; nb.onclick = () => { this.unlock(); this.p = this.gen(); this.maybeLock(); this.html(); };
     tb.append(nb);
-    tb.append(ui.seg('Chart', [['15m', '15m'], ['1h', '1h'], ['4h', '4h']], o.ctf, v => { o.ctf = v; this.save(); this.zv = { n: 72, off: 0 }; }));
+    if (o.mode === 'scalp') tb.append(ui.seg('Chart', [['1m', '1m'], ['5m', '5m'], ['15m', '15m']], o.ctfS, v => { o.ctfS = v; this.save(); this.zv = { n: 90, off: 0 }; }));
+    else tb.append(ui.seg('Chart', [['15m', '15m'], ['1h', '1h'], ['4h', '4h']], o.ctf, v => { o.ctf = v; this.save(); this.zv = { n: 72, off: 0 }; }));
     tb.append(ui.toggle('⛶ Full chart', o.full, v => { o.full = v; this.save(); this.applyFull(); }, 'Give the chart the whole page (status banner stays). Scroll = zoom, drag = pan, double-click = reset.'));
     tb.append(el('span', 'lbl', 'Rule-based setup — a decision aid, not financial advice.'));
   },
-  key() { return 'lock:' + OF.S.symbol; },
+  isScalp() { return this.o.mode === 'scalp'; },
+  key() { return (this.isScalp() ? 'lockS:' : 'lock:') + OF.S.symbol; },
+  gen() { return this.isScalp() ? OF.scalpPlan() : OF.tradePlan(); },
   unlock() { this.L = null; LS.set(this.key(), null); },
   maybeLock() {
     const p = this.p; if (!p || p.wait || !p.plan) return;
     if (this.L && !FINAL[this.L.state]) return;
-    this.L = lockPlan(p, OF.S.symbol); LS.set(this.key(), this.L);
+    this.L = this.isScalp() ? lockPlan(p, OF.S.symbol, 20 * 6e4, '20 min') : lockPlan(p, OF.S.symbol, 4 * 36e5, '4 h'); LS.set(this.key(), this.L);
   },
   applyFull() { if (this.root) this.root.classList.toggle('plfull', !!this.o.full); this.c && this.c.fit(); },
   mount(v) {
@@ -221,6 +345,7 @@ OF.views.plan = {
   },
   reading() {
     const p = this.p; if (!p || p.wait) return 'Collecting data for the plan…';
+    if (p.scalp) return `Scalp engine: bias <b class="${p.bias > 0 ? 'g' : 'r'}">${p.bias > 0 ? 'bullish' : 'bearish'} ${Math.abs(p.bias * 100).toFixed(0)}</b> · <b>${p.passed}/9</b> confirmation checks pass · 5m ATR ${OF.fp(p.atr)} · re-checked every 5 s; a confirmed scalp is locked and tracked (expires in 20 min if not filled).`;
     return `Live analysis: bias <b class="${p.bias > 0 ? 'g' : 'r'}">${p.bias > 0 ? 'bullish' : 'bearish'} ${Math.abs(p.bias * 100).toFixed(0)}</b> · ${Math.round(p.agree * 100)}% of factors agree · 1h ATR ${OF.fp(p.atr)} · ${p.zones.length} price zones. Updates every 15 s; a locked plan keeps its levels.`;
   },
   status() {
@@ -230,8 +355,13 @@ OF.views.plan = {
     const pnlR = L ? (px - L.entry) * L.dir / L.risk : 0;
     let cls = 'wait', icon = '⏳', head = '', body = '';
     if (!L) {
+      if (p.scalp) {
+        head = `NO CONFIRMED SCALP — ${p.passed}/9 checks pass`;
+        body = `Do nothing yet. Missing: ${p.checks.filter(c => !c.ok).map(c => c.name).join(' · ')}. It re-checks every 5 s and locks a scalp the moment 7/9 pass (including the three ★ checks).`;
+      } else {
       head = 'NO TRADE — waiting for a trigger';
       body = `No plan is active. Watch for a 1h candle to <b>close above ${fp(p.long.trigger)}</b> (long idea) or <b>below ${fp(p.short.trigger)}</b> (short idea). Do nothing until then.`;
+      }
     } else {
       const side = L.dir > 0 ? 'BUY' : 'SELL', live = p.plan ? p.side : 0;
       const flip = live && live !== L.dir ? `<div class="y">⚠ Live analysis now points ${live > 0 ? 'LONG' : 'SHORT'} — consider cancelling this plan (✚ New plan).</div>` : '';
@@ -265,7 +395,7 @@ OF.views.plan = {
     const lockedCard = L => {
       const qty = L.risk ? o.acct * o.risk / 100 / L.risk : 0, dirTxt = L.dir > 0 ? 'LONG' : 'SHORT';
       return `<div class="plcard ${L.dir > 0 ? 'long' : 'short'}">
-        <div class="plh"><b>${dirTxt} plan · locked ${OF.hm(L.created)}</b><span class="muted sm">${L.eType === 'limit' ? (L.dir > 0 ? 'buy' : 'sell') + ' limit order' : 'at market'} · 1h intraday · confidence ${L.conf}%</span></div>
+        <div class="plh"><b>${dirTxt} ${L.scalp ? 'scalp' : 'plan'} · locked ${OF.hm(L.created)}</b><span class="muted sm">${L.eType === 'limit' ? (L.dir > 0 ? 'buy' : 'sell') + ' limit order' : 'at market'} · ${L.scalp ? '1–5m scalp' : '1h intraday'} · confidence ${L.conf}%</span></div>
         <div class="plrow"><span>Entry</span><b class="mono">${fmt(L.entry)}</b><span class="muted sm">${L.baseSrc.length ? 'at ' + L.baseSrc.join(', ') : ''}</span></div>
         <div class="plrow"><span class="r">Stop loss</span><b class="mono r">${fmt(L.stopNow)}</b><span class="muted sm">${L.stopNow === L.entry ? 'moved to entry after TP1' : 'risk ' + fmt(L.risk) + ' per ' + S.info.base}</span></div>
         <div class="plrow"><span class="g">Take profit 1</span><b class="mono g">${fmt(L.tp1)}</b><span class="muted sm">${L.rr1.toFixed(1)}R${L.tp1Src.length ? ' · ' + L.tp1Src.join(', ') : ''} — close half, stop to entry</span></div>
@@ -273,30 +403,44 @@ OF.views.plan = {
         <div class="plrow"><span>Size</span><b class="mono">${qty < 1 ? qty.toFixed(4) : qty.toFixed(3)} ${S.info.base}</b><span class="muted sm">${OF.fmtUsd(qty * L.entry)} notional · loses ${OF.fmtUsd(o.acct * o.risk / 100)} at the stop</span></div></div>`;
     };
     const condCard = pl => `<div class="plcard alt"><div class="plh"><b>Idea if it turns: ${pl.dir > 0 ? 'LONG' : 'SHORT'}</b><span class="muted sm">not active</span></div>
-        <div class="muted sm" style="margin-bottom:4px">Only after a 1h candle <b>closes ${pl.dir > 0 ? 'above' : 'below'} ${fmt(pl.trigger)}</b> and the bias turns ${pl.dir > 0 ? 'bullish' : 'bearish'} — then press ✚ New plan.</div>
+        <div class="muted sm" style="margin-bottom:4px">${p.scalp ? `Locks automatically when the ${pl.dir > 0 ? 'buy' : 'sell'} checks reach 7/9.` : `Only after a 1h candle <b>closes ${pl.dir > 0 ? 'above' : 'below'} ${fmt(pl.trigger)}</b> and the bias turns ${pl.dir > 0 ? 'bullish' : 'bearish'} — then press ✚ New plan.`}</div>
         <div class="plrow"><span>Entry area</span><b class="mono">${fmt(pl.entry)}</b><span class="muted sm">${pct(pl.entry)} from price</span></div>
         <div class="plrow"><span class="r">Stop</span><b class="mono r">${fmt(pl.stop)}</b><span></span></div>
         <div class="plrow"><span class="g">Targets</span><b class="mono g">${fmt(pl.tp1)}</b><span class="muted sm">then ${fmt(pl.tp2)} · ${pl.rr1.toFixed(1)}R / ${pl.rr2.toFixed(1)}R</span></div></div>`;
-    top.innerHTML = `<div class="plcards">${L ? lockedCard(L) + condCard(L.dir > 0 ? p.short : p.long) : condCard(p.long) + condCard(p.short)}</div>`;
+    const pr = (L && L.prob) || p.prob;
+    const probHtml = !pr ? '<div class="plcard"><div class="plh"><b>Win probability</b></div><div class="muted sm">Measuring on past candles…</div></div>'
+      : !pr.decided ? `<div class="plcard"><div class="plh"><b>Win probability</b></div><div class="muted sm">No similar setups found in the ${pr.label}.</div></div>`
+      : (() => {
+        const w = Math.round(pr.win * 100), be = Math.round(pr.be * 100), edge = w - be, cls = edge >= 5 ? 'g' : edge >= 0 ? 'y' : 'r', low = pr.decided < 30;
+        return `<div class="plcard prob"><div class="plh"><b>Win probability (TP1 before stop)</b><span class="muted sm">measured, not guessed</span></div>
+          <div class="pbig ${cls}">${w}%</div>
+          <div class="pbar"><i style="width:${w}%"></i><b style="left:${be}%"></b></div>
+          <div class="muted sm">From <b>${pr.decided}</b> similar ${L ? (L.dir > 0 ? 'long' : 'short') : ''} setups in the ${pr.label}${low ? ' — <span class="y">small sample, treat with care</span>' : ''}.
+          Break-even needs <b>${be}%</b> at these targets → edge <b class="${cls}">${edge >= 0 ? '+' : ''}${edge}%</b>.
+          Reached TP2: ${Math.round(pr.w2 * 100)}% · average result ${pr.exp >= 0 ? '+' : ''}${pr.exp.toFixed(2)}R per setup.
+          Order-book checks can't be replayed (no book history), so this is the base rate before them.</div></div>`;
+      })();
+    const checksHtml = p.scalp ? `<div class="plcard checks"><div class="plh"><b>Confirmation checks ${p.passed}/9</b><span class="muted sm">★ = must pass</span></div>${p.checks.map(c => `<div class="chk ${c.ok ? 'ok' : 'no'}"><span>${c.ok ? '✓' : '✗'}</span><b>${c.name}${c.key ? ' ★' : ''}</b><span class="muted sm">${c.text}</span></div>`).join('')}</div>` : '';
+    top.innerHTML = `<div class="plcards">${probHtml}${checksHtml}</div><div class="plcards">${L ? lockedCard(L) + condCard(L.dir > 0 ? p.short : p.long) : condCard(p.long) + condCard(p.short)}</div>`;
     const zl = z => `<div class="zr"><b class="mono">${fmt(z.p)}</b><span class="zw" style="width:${Math.min(60, z.w * 9)}px"></span><span class="muted sm">${z.src.join(' · ')}</span></div>`;
     side.innerHTML = `<div class="sh">Resistance above (nearest first)</div>${p.res.slice(0, 7).map(zl).join('') || '<div class="muted pad">none within 6%</div>'}
       <div class="zr now"><b class="mono">${fmt(p.px)}</b><span class="muted sm">price now</span></div>
       <div class="sh">Support below (nearest first)</div>${p.sup.slice(0, 7).map(zl).join('') || '<div class="muted pad">none within 6%</div>'}`;
     const groups = [...new Set(p.factors.map(f => f.group))];
-    fac.innerHTML = '<h3>What the analysis is based on (live)</h3><table class="tbl"><thead><tr><th>Factor</th><th>Weight</th><th>Vote</th><th>Reading</th></tr></thead><tbody>' +
+    fac.innerHTML = '<h3>What the ' + (p.scalp ? 'scalp engine' : 'analysis') + ' is based on (live)</h3><table class="tbl"><thead><tr><th>Factor</th><th>Weight</th><th>Vote</th><th>Reading</th></tr></thead><tbody>' +
       groups.map(gp => p.factors.filter(f => f.group === gp).map(f => {
         const v = f.s == null ? '—' : f.s > 0.15 ? '<b class="g">▲ long</b>' : f.s < -0.15 ? '<b class="r">▼ short</b>' : '<span class="muted">neutral</span>';
         return `<tr><td>${f.name}</td><td class="mono muted">${f.w}</td><td>${v} <span class="mono muted sm">${f.s == null ? '' : (f.s * 100).toFixed(0)}</span></td><td class="wrap">${f.text}</td></tr>`;
       }).join('')).join('') + '</tbody></table>';
   },
   render() {
-    if (!this.p || Date.now() - this.p.at > 15000 || this.p.wait) { this.p = OF.tradePlan(); this.p.at = this.p.at || Date.now(); this.maybeLock(); this.html(); }
+    if (!this.p || Date.now() - this.p.at > (this.isScalp() ? 5000 : 15000) || this.p.wait) { this.p = this.gen(); this.p.at = this.p.at || Date.now(); this.maybeLock(); this.html(); }
     this.track();
     if (!this._st || Date.now() - this._st > 1000) { this._st = Date.now(); this.status(); }
     const p = this.p, c = this.c.fit(), ctx = c.ctx, W = c.w, H = c.h, S = OF.S, L = this.L;
     ctx.fillStyle = C.bg; ctx.fillRect(0, 0, W, H);
     if (!p || p.wait) { ui.msg(ctx, W, H, p ? p.wait : 'Loading…'); return; }
-    const tf = this.o.ctf, k = S.k[tf]; if (!k || !k.length) { OF.loadKlines(tf); ui.msg(ctx, W, H, 'Loading ' + tf + ' candles…'); return; }
+    const tf = this.isScalp() ? this.o.ctfS : this.o.ctf, k = S.k[tf]; if (!k || !k.length) { OF.loadKlines(tf); ui.msg(ctx, W, H, 'Loading ' + tf + ' candles…'); return; }
     const ms = OF.tfMs[tf], AX = 80, TB = 18, pw = W - AX, ph = H - TB;
     const n = Math.min(this.zv.n, k.length), end = Math.max(n, k.length - this.zv.off), i0 = Math.max(0, end - n);
     const bw = pw / (n + Math.max(6, n * 0.18)), X = i => (i - i0 + 0.5) * bw; this.bw = bw;
