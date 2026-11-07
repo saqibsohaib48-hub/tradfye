@@ -521,7 +521,7 @@ OF.keyRead = function () {
     for (const w of ws.slice(0, 10)) {
       const st = wallStand(w.p), pu = pullsNear(w.p, bb.bin * 1.5), fake = pu >= 3;
       let wt = 1 + 2 * w.n / mx; if (st > 120) wt *= 1.3; if (fake) wt *= 0.4;
-      add(w.p, wt, `${w.side} wall ${OF.fmtUsd(w.n)}${st > 60 ? ' (standing ' + (st < 120 ? Math.round(st) + 's' : Math.round(st / 60) + 'm') + ')' : ''}${fake ? ' — pulled ' + pu + '×, may be fake' : ''}`, fake);
+      add(w.p, wt, `${w.side} wall ${OF.fmtUsd(w.n)}${fake ? ' ⚠ pulled ' + pu + '×' : st > 60 ? ' · ' + (st < 120 ? Math.round(st) + 's' : Math.round(st / 60) + 'm') + ' old' : ''}`, fake);
     }
   }
   if (ss) {
@@ -579,13 +579,14 @@ OF.drawKeyLevels = (ctx, x0, x1, Y, lo, hi) => {
       const up = z.lo > hi; ctx.font = 'bold 11px ui-monospace,Menlo,monospace'; ctx.fillStyle = `rgb(${col})`; ctx.textAlign = 'left'; ctx.textBaseline = up ? 'top' : 'bottom';
       ctx.fillText(`${up ? '↑' : '↓'} ${label} ${OF.fp(z.p)} (${((z.p / k.px - 1) * 100).toFixed(2)}%, off chart)`, x0 + 290, up ? Y(hi) + 4 : Y(lo) - 4); return;
     }
-    const pad = k.atr * 0.05, y1 = Y(z.hi + pad), y2 = Y(z.lo - pad);
-    ctx.fillStyle = `rgba(${col},${strong ? 0.16 : 0.08})`; ctx.fillRect(x0, y1, x1 - x0, Math.max(3, y2 - y1));
+    // thin band at the level (capped — wide merged zones used to paint over half the chart)
+    const half = Math.min((z.hi - z.lo) / 2 + k.atr * 0.04, k.atr * 0.12), y1 = Y(z.p + half), y2 = Y(z.p - half);
+    ctx.fillStyle = `rgba(${col},${strong ? 0.14 : 0.07})`; ctx.fillRect(x0, y1, x1 - x0, Math.max(3, y2 - y1));
     ctx.strokeStyle = `rgba(${col},${strong ? 0.95 : 0.5})`; ctx.lineWidth = strong ? 2 : 1; ctx.setLineDash(strong ? [] : [4, 4]);
     ctx.beginPath(); ctx.moveTo(x0, Math.round(Y(z.p)) + .5); ctx.lineTo(x1, Math.round(Y(z.p)) + .5); ctx.stroke(); ctx.setLineDash([]); ctx.lineWidth = 1;
-    ctx.font = 'bold 11px ui-monospace,Menlo,monospace'; const t = `${label} ${OF.fp(z.p)}${z.fake ? ' ⚠' : ''}`, w = ctx.measureText(t).width + 12, ly = Y(z.p);
+    ctx.font = 'bold 11px ui-monospace,Menlo,monospace'; const t = `${label} ${OF.fp(z.p)}${z.fake ? ' ⚠' : ''}`, w = ctx.measureText(t).width + 12, yTop = Y(hi), yBot = Y(lo), ly = OF.clamp(Y(z.p), yTop + 10, yBot - 10);
     ctx.fillStyle = `rgb(${col})`; ctx.fillRect(x0 + 4, ly - 9, w, 18); ctx.fillStyle = '#000'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle'; ctx.fillText(t, x0 + 10, ly);
-    if (strong) { ctx.font = '10px ui-monospace,monospace'; ctx.fillStyle = `rgb(${col})`; ctx.fillText(z.src.slice(0, 3).join(' · '), x0 + w + 10, ly + (kind === 'res' ? -12 : kind === 'at' ? 0 : 12)); }
+    if (strong) { ctx.font = '10px ui-monospace,monospace'; ctx.fillStyle = `rgb(${col})`; ctx.fillText(z.src.slice(0, 2).map(s => s.replace(/ — .*$/, '').replace(/ \(standing.*?\)/, '')).join(' · '), x0 + w + 10, ly); }
   };
   band(k.inside, 'at', '★ KEY LEVEL — price is here', true);
   band(k.res, 'res', '★ KEY RESISTANCE', true); band(k.sup, 'sup', '★ KEY SUPPORT', true);

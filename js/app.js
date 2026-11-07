@@ -185,10 +185,32 @@ function tick(force) {
   if (A.panel && (force || n % 2 === 0)) { renderDecision(); renderDom(); }
 }
 
+/* ---------- View menu: hide any strip for a bigger chart ---------- */
+const HIDE = [['brand', 'Brand bar', '.brandbar'], ['mtf', 'Market direction bar', '#mtf'], ['kr', 'Key points strip', '#keyread'], ['read', 'Explanation line under the toolbar', '#reading'], ['tb', 'Tool bar (span, range, columns…)', '#toolbar'], ['stats', 'Candle Δ / CVD / POC in the tab bar', '.stats .mono']];
+function applyHide() { const h = LS.get('hide', {}); HIDE.forEach(([k]) => document.body.classList.toggle('hide-' + k, !!h[k])); setTimeout(() => tick(true), 0); }
+function setFull(on) { const h = {}; if (on) HIDE.forEach(([k]) => { if (k !== 'tb') h[k] = true; }); LS.set('hide', h); A.panel = !on; applyPanel(); applyHide(); }
+function viewMenu() {
+  let pop = $('viewPop'); if (pop) { pop.remove(); return; }
+  const h = LS.get('hide', {}); pop = el('div', 'colspop viewpop'); pop.id = 'viewPop';
+  const r = $('viewBtn').getBoundingClientRect(); pop.style.top = (r.bottom + 6) + 'px'; pop.style.left = Math.max(8, r.right - 300) + 'px'; pop.style.width = '300px';
+  pop.innerHTML = '<div class="cph">Show on screen</div>' + HIDE.map(([k, t]) => `<label class="vrow"><input type="checkbox" data-k="${k}" ${h[k] ? '' : 'checked'}> ${t}</label>`).join('') +
+    `<label class="vrow"><input type="checkbox" data-k="panel" ${A.panel ? 'checked' : ''}> Right panel (Decision + DOM) <span class="muted sm">P</span></label>
+     <div class="vbtns"><button data-a="full">⛶ Full chart view <span class="muted sm">F</span></button><button data-a="all">Show everything</button></div>`;
+  pop.querySelectorAll('input').forEach(i => i.onchange = () => {
+    if (i.dataset.k === 'panel') { A.panel = i.checked; applyPanel(); setTimeout(() => tick(true), 0); return; }
+    const hh = LS.get('hide', {}); hh[i.dataset.k] = !i.checked; LS.set('hide', hh); applyHide();
+  });
+  pop.querySelector('[data-a=full]').onclick = () => { setFull(true); pop.remove(); };
+  pop.querySelector('[data-a=all]').onclick = () => { setFull(false); pop.remove(); };
+  document.body.appendChild(pop);
+  setTimeout(() => document.addEventListener('pointerdown', function f(e) { if (!pop.contains(e.target) && e.target !== $('viewBtn')) { pop.remove(); document.removeEventListener('pointerdown', f); } }), 0);
+}
+
 /* ---------- keys ---------- */
 document.addEventListener('keydown', e => {
   if (e.ctrlKey || e.metaKey || e.altKey || (e.target && e.target.closest && e.target.closest('input,select,textarea'))) return;
-  if (e.key === 'p' || e.key === 'P') { A.panel = !A.panel; applyPanel(); return; }
+  if (e.key === 'p' || e.key === 'P') { A.panel = !A.panel; applyPanel(); setTimeout(() => tick(true), 0); return; }
+  if (e.key === 'f' || e.key === 'F') { const h = LS.get('hide', {}); setFull(!(h.mtf && h.kr && h.read)); return; }
   if (/^[0-9]$/.test(e.key)) { const i = e.key === '0' ? 9 : +e.key - 1; if (ORDER[i]) setView(ORDER[i]); }
 });
 
@@ -231,6 +253,7 @@ window.addEventListener('DOMContentLoaded', () => {
   OF.demo = /[?&]demo=1/.test(location.search);
   buildHeader(); buildTabs(); applyPanel();
   $('panelBtn').onclick = $('vtab').onclick = () => { A.panel = !A.panel; applyPanel(); };
+  applyHide(); $('viewBtn').onclick = viewMenu;
   const sym = (new URLSearchParams(location.search).get('symbol') || LS.get('symbol', 'BTCUSDT')).toUpperCase();
   startSymbol(sym);
   setInterval(tick, 250);
