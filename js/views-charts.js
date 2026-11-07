@@ -291,8 +291,17 @@ OF.drawGammaLines = (ctx, pw, Y, lo, hi) => {
 };
 OF.drawLiqLines = (ctx, pw, Y, lo, hi) => {
   const m = OF.liqMap(); if (!m || !m.rows.length) return;
-  const top = m.rows.filter(r => r.p > lo && r.p < hi).sort((a, b) => (b.long + b.short) - (a.long + a.short)).slice(0, 4);
-  for (const r of top) { const p = r.p + m.bin / 2; ui.hline(ctx, 0, pw, Y(p), r.p > m.mid ? C.buy : C.sell, [1, 4], (r.p > m.mid ? 'short liq ' : 'long liq ') + OF.fp(p) + ' · ' + OF.fmtUsd(r.long + r.short), pw - 230); }
+  // pick the biggest clusters on EACH side so zooming out never hides one side
+  const side = (above) => m.rows.filter(r => above ? r.p > m.mid && r.short > 0 : r.p < m.mid && r.long > 0)
+    .map(r => ({ p: r.p + m.bin / 2, n: above ? r.short : r.long, above })).sort((a, b) => b.n - a.n);
+  for (const above of [true, false]) {
+    const all = side(above), vis = all.filter(r => r.p > lo && r.p < hi).slice(0, 3), col = above ? C.buy : C.sell;
+    for (const r of vis) ui.hline(ctx, 0, pw, Y(r.p), col, [1, 4], (above ? 'short liq ' : 'long liq ') + OF.fp(r.p) + ' · ' + OF.fmtUsd(r.n), pw - 230);
+    if (!vis.length && all.length) {   // biggest cluster is off-screen: say so at the edge
+      const r = all[0]; ctx.font = '11px ui-monospace,monospace'; ctx.fillStyle = col; ctx.textAlign = 'right'; ctx.textBaseline = above ? 'top' : 'bottom';
+      ctx.fillText((above ? '↑ ' : '↓ ') + (above ? 'short liq ' : 'long liq ') + OF.fp(r.p) + ' · ' + OF.fmtUsd(r.n) + ' (off chart)', pw - 6, above ? Y(hi) + 4 : Y(lo) - 4);
+    }
+  }
 };
 /* resting order-book liquidity: biggest bid / ask walls within ±3 % */
 OF.drawWallLines = (ctx, pw, Y, lo, hi) => {

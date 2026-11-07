@@ -196,3 +196,19 @@ input.num{width:84px;background:var(--panel2);border-radius:5px;padding:3px 6px;
 .mchip.flat{color:#cbd5e1}
 .mchip.ov{font-weight:700;margin-left:6px}
 .mchip.ov.up{background:rgba(34,197,94,.2)}.mchip.ov.dn{background:rgba(239,68,68,.2)}
+
+/* plan status banner + full chart */
+.plstatus{display:flex;gap:12px;align-items:flex-start;border-radius:10px;padding:10px 14px;margin-bottom:10px;border:1px solid var(--line);background:var(--panel)}
+.plstatus.wait{border-color:rgba(245,158,11,.55);background:rgba(245,158,11,.07)}
+.plstatus.on{border-color:rgba(34,197,94,.6);background:rgba(34,197,94,.09)}
+.plstatus.risk{border-color:rgba(239,68,68,.6);background:rgba(239,68,68,.09)}
+.pli{font-size:22px;line-height:1}
+.plsh{font-weight:700;font-size:15px}
+.plsb{font-size:12.5px;color:#cbd5e1;margin-top:2px}
+.plev{display:flex;flex-wrap:wrap;gap:4px 14px;margin-top:5px;font-size:11px;color:var(--muted);font-family:var(--mono)}
+.view.plfull #plTop,.view.plfull #plSide,.view.plfull #plFactors{display:none}
+.view.plfull .plgrid{grid-template-columns:1fr}
+.view.plfull .plchart{height:calc(100% - 96px);min-height:420px}
+.view.plfull{display:flex;flex-direction:column}
+.view.plfull .plgrid{flex:1;min-height:0}
+.view.plfull .plchart{height:100%}

@@ -149,95 +149,188 @@ OF.tradePlan = function () {
     verdict: plan ? (side > 0 ? 'LONG' : 'SHORT') : 'NO TRADE' };
 };
 
-/* ===================== TRADE PLAN TAB ===================== */
+/* ===================== TRADE PLAN TAB =====================
+   A plan is LOCKED when created so its levels do not move every refresh. It is then tracked tick by tick:
+   waiting → active (entry touched) → tp1 (half off, stop to entry) → done / breakeven, or stopped,
+   missed (target reached before entry), expired (not filled in 4 h). The analysis below keeps updating. */
+const FINAL = { stopped: 1, done: 1, breakeven: 1, missed: 1, expired: 1 };
+function lockPlan(p, symbol) {
+  const pl = p.plan;
+  return { symbol, created: OF.now(), dir: pl.dir, entry: pl.entry, stop: pl.stop, stopNow: pl.stop, tp1: pl.tp1, tp2: pl.tp2, rr1: pl.rr1, rr2: pl.rr2, risk: pl.risk, eType: pl.eType,
+    baseSrc: pl.base ? pl.base.src.slice(0, 2) : [], tp1Src: pl.tp1z ? pl.tp1z.src.slice(0, 2) : [], tp2Src: pl.tp2z ? pl.tp2z.src.slice(0, 2) : [],
+    state: pl.eType === 'market' ? 'active' : 'waiting', filledAt: pl.eType === 'market' ? OF.now() : null, events: [], lastT: OF.now(), expires: OF.now() + 4 * 36e5, conf: p.conf };
+}
+function step(L, price, t) {
+  const d = L.dir, up = x => d > 0 ? price >= x : price <= x, down = x => d > 0 ? price <= x : price >= x;
+  if (L.state === 'waiting') {
+    if (down(L.entry)) { L.state = 'active'; L.filledAt = t; L.events.push([t, 'Entry filled at ' + OF.fp(L.entry)]); }
+    else if (up(L.tp1)) { L.state = 'missed'; L.events.push([t, 'Price reached TP1 before the entry — missed, do not chase']); }
+    else if (t > L.expires) { L.state = 'expired'; L.events.push([t, 'Not filled within 4 h — cancelled']); }
+  } else if (L.state === 'active') {
+    if (down(L.stopNow)) { L.state = 'stopped'; L.events.push([t, 'Stop hit at ' + OF.fp(L.stopNow) + ' (−1R)']); }
+    else if (up(L.tp1)) { L.state = 'tp1'; L.stopNow = L.entry; L.events.push([t, 'TP1 hit — half closed, stop moved to entry']); }
+  } else if (L.state === 'tp1') {
+    if (up(L.tp2)) { L.state = 'done'; L.events.push([t, 'TP2 hit — trade complete']); }
+    else if (down(L.stopNow)) { L.state = 'breakeven'; L.events.push([t, 'Returned to entry after TP1 — rest closed at breakeven']); }
+  }
+}
 OF.views.plan = {
-  label: 'Trade plan', title: 'Everything combined into one 1h intraday setup — entry, stop, targets',
-  o: Object.assign({ acct: 1000, risk: 1 }, LS.get('plan', {})),
+  label: 'Trade plan', title: 'Everything combined into one 1h intraday setup — entry, stop, targets, and live status',
+  o: Object.assign({ acct: 1000, risk: 1, full: false, ctf: '1h' }, LS.get('plan', {})),
+  zv: { n: 72, off: 0 },
+  save() { LS.set('plan', this.o); },
   toolbar(tb) {
     const o = this.o;
-    const inp = (lab, key, step) => { const w = el('div', 'grp'); w.appendChild(el('span', 'lbl', lab)); const i = el('input', 'num'); i.type = 'number'; i.step = step; i.value = o[key]; i.oninput = () => { o[key] = +i.value || 0; LS.set('plan', o); this.html(); }; w.appendChild(i); return w; };
-    tb.append(inp('Account $', 'acct', 100), inp('Risk per trade %', 'risk', 0.25));
-    const b = el('button', 'tgl on', '↻ Recalculate'); b.onclick = () => { this.p = OF.tradePlan(); this.html(); }; tb.append(b);
-    tb.append(el('span', 'lbl', 'Rule-based setup from public data — a decision aid, not financial advice.'));
+    const inp = (lab, key, step) => { const w = el('div', 'grp'); w.appendChild(el('span', 'lbl', lab)); const i = el('input', 'num'); i.type = 'number'; i.step = step; i.value = o[key]; i.oninput = () => { o[key] = +i.value || 0; this.save(); this.html(); }; w.appendChild(i); return w; };
+    tb.append(inp('Account $', 'acct', 100), inp('Risk %', 'risk', 0.25));
+    const nb = el('button', 'tgl on', '✚ New plan'); nb.title = 'Discard the current plan and build a fresh one from the latest data'; nb.onclick = () => { this.unlock(); this.p = OF.tradePlan(); this.maybeLock(); this.html(); };
+    tb.append(nb);
+    tb.append(ui.seg('Chart', [['15m', '15m'], ['1h', '1h'], ['4h', '4h']], o.ctf, v => { o.ctf = v; this.save(); this.zv = { n: 72, off: 0 }; }));
+    tb.append(ui.toggle('⛶ Full chart', o.full, v => { o.full = v; this.save(); this.applyFull(); }, 'Give the chart the whole page (status banner stays). Scroll = zoom, drag = pan, double-click = reset.'));
+    tb.append(el('span', 'lbl', 'Rule-based setup — a decision aid, not financial advice.'));
   },
+  key() { return 'lock:' + OF.S.symbol; },
+  unlock() { this.L = null; LS.set(this.key(), null); },
+  maybeLock() {
+    const p = this.p; if (!p || p.wait || !p.plan) return;
+    if (this.L && !FINAL[this.L.state]) return;
+    this.L = lockPlan(p, OF.S.symbol); LS.set(this.key(), this.L);
+  },
+  applyFull() { if (this.root) this.root.classList.toggle('plfull', !!this.o.full); this.c && this.c.fit(); },
   mount(v) {
-    v.classList.add('scroll');
-    v.innerHTML = '<div id="plTop"></div><div class="plgrid"><div class="gbox plchart" id="plChart"></div><div id="plSide"></div></div><div id="plFactors"></div>';
+    this.root = v; v.classList.add('scroll');
+    v.innerHTML = '<div id="plStatus"></div><div id="plTop"></div><div class="plgrid"><div class="gbox plchart" id="plChart"></div><div id="plSide"></div></div><div id="plFactors"></div>';
     this.c = ui.canvas(document.getElementById('plChart')); ui.track(this);
-    this.p = null; this.lastHtml = 0;
+    const cv = this.c.cv; let drag = null;
+    cv.onwheel = e => { e.preventDefault(); this.zv.n = OF.clamp(Math.round(this.zv.n * (e.deltaY > 0 ? 1.15 : 0.87)), 15, 600); };
+    cv.onmousedown = e => { drag = { x: e.clientX, off: this.zv.off }; };
+    window.addEventListener('mouseup', () => drag = null);
+    cv.addEventListener('mousemove', e => { if (drag && this.bw) this.zv.off = Math.max(0, drag.off + Math.round((e.clientX - drag.x) / this.bw)); });
+    cv.ondblclick = () => { this.zv = { n: 72, off: 0 }; };
+    const saved = LS.get(this.key(), null);
+    this.L = saved && saved.symbol === OF.S.symbol ? saved : null;
+    this.p = null; this.applyFull();
+  },
+  track() {
+    const L = this.L, S = OF.S; if (!L || FINAL[L.state]) return;
+    const tr = S.trades;
+    for (let i = OF.lb(tr, L.lastT + 1); i < tr.length; i++) { step(L, tr[i].p, tr[i].t); if (FINAL[L.state]) break; }
+    if (!FINAL[L.state] && L.state === 'waiting' && OF.now() > L.expires) step(L, S.last, OF.now());
+    L.lastT = tr.length ? tr[tr.length - 1].t : OF.now();
+    LS.set(this.key(), L);
   },
   reading() {
     const p = this.p; if (!p || p.wait) return 'Collecting data for the plan…';
-    return `Bias <b class="${p.bias > 0 ? 'g' : 'r'}">${p.bias > 0 ? 'bullish' : 'bearish'} ${Math.abs(p.bias * 100).toFixed(0)}</b> · ${Math.round(p.agree * 100)}% of factors agree · 1h ATR ${OF.fp(p.atr)} · ${p.zones.length} price zones from ${p.zones.reduce((a, z) => a + z.src.length, 0)} level sources. Plan refreshes every 15 s.`;
+    return `Live analysis: bias <b class="${p.bias > 0 ? 'g' : 'r'}">${p.bias > 0 ? 'bullish' : 'bearish'} ${Math.abs(p.bias * 100).toFixed(0)}</b> · ${Math.round(p.agree * 100)}% of factors agree · 1h ATR ${OF.fp(p.atr)} · ${p.zones.length} price zones. Updates every 15 s; a locked plan keeps its levels.`;
+  },
+  status() {
+    const L = this.L, p = this.p, S = OF.S, box = document.getElementById('plStatus'); if (!box) return;
+    if (!p || p.wait) { box.innerHTML = ''; return; }
+    const px = S.last, fp = OF.fp, hm = OF.hm, dist = x => Math.abs(x / px - 1) * 100;
+    const pnlR = L ? (px - L.entry) * L.dir / L.risk : 0;
+    let cls = 'wait', icon = '⏳', head = '', body = '';
+    if (!L) {
+      head = 'NO TRADE — waiting for a trigger';
+      body = `No plan is active. Watch for a 1h candle to <b>close above ${fp(p.long.trigger)}</b> (long idea) or <b>below ${fp(p.short.trigger)}</b> (short idea). Do nothing until then.`;
+    } else {
+      const side = L.dir > 0 ? 'BUY' : 'SELL', live = p.plan ? p.side : 0;
+      const flip = live && live !== L.dir ? `<div class="y">⚠ Live analysis now points ${live > 0 ? 'LONG' : 'SHORT'} — consider cancelling this plan (✚ New plan).</div>` : '';
+      if (L.state === 'waiting') {
+        icon = '⏳'; cls = 'wait';
+        head = `WAITING — not active yet. Place a ${side} LIMIT at ${fp(L.entry)}`;
+        body = `Price ${fp(px)} is <b>${dist(L.entry).toFixed(2)}% ${px < L.entry ? 'below' : 'above'}</b> the entry. The trade only starts if price comes to ${fp(L.entry)}. Stop ${fp(L.stop)} · TP1 ${fp(L.tp1)} · TP2 ${fp(L.tp2)}. Cancel at ${hm(L.expires)} if not filled.` + flip;
+      } else if (L.state === 'active') {
+        icon = '🟢'; cls = pnlR >= 0 ? 'on' : 'risk';
+        head = `ACTIVE — ${side} filled at ${fp(L.entry)}${L.filledAt ? ' (' + hm(L.filledAt) + ')' : ''}`;
+        body = `Now <b class="${pnlR >= 0 ? 'g' : 'r'}">${pnlR >= 0 ? '+' : ''}${pnlR.toFixed(2)}R</b>. Stop ${fp(L.stopNow)} (${dist(L.stopNow).toFixed(2)}% away) · TP1 ${fp(L.tp1)} (${dist(L.tp1).toFixed(2)}% away). Keep the stop where it is.` + flip;
+      } else if (L.state === 'tp1') {
+        icon = '✅'; cls = 'on';
+        head = `TP1 HIT — half closed, stop moved to entry ${fp(L.entry)}`;
+        body = `Remaining half is risk-free. Next target TP2 ${fp(L.tp2)} (${dist(L.tp2).toFixed(2)}% away). Now ${pnlR >= 0 ? '+' : ''}${pnlR.toFixed(2)}R on the runner.`;
+      } else {
+        const res = { stopped: ['❌', 'risk', 'STOPPED OUT (−1R)'], done: ['🏁', 'on', `COMPLETE — TP1 + TP2 (≈ +${((L.rr1 + L.rr2) / 2).toFixed(1)}R)`], breakeven: ['➖', 'wait', `CLOSED — half at TP1, half at entry (≈ +${(L.rr1 / 2).toFixed(1)}R)`], missed: ['↷', 'wait', 'MISSED — price left without filling the entry'], expired: ['⌛', 'wait', 'EXPIRED — entry not filled within 4 h'] }[L.state];
+        icon = res[0]; cls = res[1]; head = res[2] + ' · plan finished';
+        body = `Press <b>✚ New plan</b> for a fresh setup from the latest data${p.plan ? ` (it currently suggests a ${p.side > 0 ? 'LONG' : 'SHORT'})` : ' (right now it says NO TRADE)'}.`;
+      }
+      if (L.events.length) body += `<div class="plev">${L.events.slice(-4).map(e => `<span>${hm(e[0], true)} · ${e[1]}</span>`).join('')}</div>`;
+    }
+    box.innerHTML = `<div class="plstatus ${cls}"><span class="pli">${icon}</span><div><div class="plsh">${head}</div><div class="plsb">${body}</div></div></div>`;
   },
   html() {
-    const p = this.p, S = OF.S; if (!p) return;
+    const p = this.p, S = OF.S, L = this.L; if (!p) return;
     const top = document.getElementById('plTop'), side = document.getElementById('plSide'), fac = document.getElementById('plFactors'); if (!top) return;
+    this.status();
     if (p.wait) { top.innerHTML = '<div class="empty">' + p.wait + '</div>'; return; }
     const o = this.o, fmt = OF.fp, pct = x => ((x / p.px - 1) * 100).toFixed(2) + '%';
-    const card = (pl, main) => {
-      const qty = pl.risk ? o.acct * o.risk / 100 / pl.risk : 0, dirTxt = pl.dir > 0 ? 'LONG' : 'SHORT';
-      return `<div class="plcard ${main ? (pl.dir > 0 ? 'long' : 'short') : 'alt'}">
-        <div class="plh"><b>${main ? dirTxt + ' setup' : 'If it flips: ' + dirTxt}</b><span class="muted sm">${pl.eType === 'limit' ? 'limit order' : 'at market'} · 1h intraday</span></div>
-        <div class="plrow"><span>Entry</span><b class="mono">${fmt(pl.entry)}</b><span class="muted sm">${pl.eType === 'limit' ? pct(pl.entry) + ' from price' : 'now'}${pl.base ? ' · at ' + pl.base.src.slice(0, 2).join(', ') : ''}</span></div>
-        <div class="plrow"><span class="r">Stop loss</span><b class="mono r">${fmt(pl.stop)}</b><span class="muted sm">risk ${fmt(pl.risk)} (${(pl.risk / p.atr).toFixed(1)}× ATR) beyond the zone</span></div>
-        <div class="plrow"><span class="g">Take profit 1</span><b class="mono g">${fmt(pl.tp1)}</b><span class="muted sm">${pl.rr1.toFixed(1)}R${pl.tp1z ? ' · ' + pl.tp1z.src.slice(0, 2).join(', ') : ' · no zone, 1.5R'} — close half, stop to entry</span></div>
-        <div class="plrow"><span class="g">Take profit 2</span><b class="mono g">${fmt(pl.tp2)}</b><span class="muted sm">${pl.rr2.toFixed(1)}R${pl.tp2z ? ' · ' + pl.tp2z.src.slice(0, 2).join(', ') : ' · no zone, 3R'}</span></div>
-        ${main ? `<div class="plrow"><span>Size</span><b class="mono">${qty < 1 ? qty.toFixed(4) : qty.toFixed(3)} ${S.info.base}</b><span class="muted sm">${OF.fmtUsd(qty * pl.entry)} notional · loses ${OF.fmtUsd(o.acct * o.risk / 100)} at the stop</span></div>` : `<div class="muted sm">Only if price ${pl.dir > 0 ? 'closes a 1h candle above' : 'closes a 1h candle below'} <b class="mono">${fmt(pl.trigger)}</b> and the bias turns ${pl.dir > 0 ? 'bullish' : 'bearish'}.</div>`}
-        ${pl.blocker ? `<div class="y sm">⚠ Strong zone in the way at ${fmt(pl.blocker.p)} (${pl.blocker.src.slice(0, 2).join(', ')})</div>` : ''}
-      </div>`;
+    const lockedCard = L => {
+      const qty = L.risk ? o.acct * o.risk / 100 / L.risk : 0, dirTxt = L.dir > 0 ? 'LONG' : 'SHORT';
+      return `<div class="plcard ${L.dir > 0 ? 'long' : 'short'}">
+        <div class="plh"><b>${dirTxt} plan · locked ${OF.hm(L.created)}</b><span class="muted sm">${L.eType === 'limit' ? (L.dir > 0 ? 'buy' : 'sell') + ' limit order' : 'at market'} · 1h intraday · confidence ${L.conf}%</span></div>
+        <div class="plrow"><span>Entry</span><b class="mono">${fmt(L.entry)}</b><span class="muted sm">${L.baseSrc.length ? 'at ' + L.baseSrc.join(', ') : ''}</span></div>
+        <div class="plrow"><span class="r">Stop loss</span><b class="mono r">${fmt(L.stopNow)}</b><span class="muted sm">${L.stopNow === L.entry ? 'moved to entry after TP1' : 'risk ' + fmt(L.risk) + ' per ' + S.info.base}</span></div>
+        <div class="plrow"><span class="g">Take profit 1</span><b class="mono g">${fmt(L.tp1)}</b><span class="muted sm">${L.rr1.toFixed(1)}R${L.tp1Src.length ? ' · ' + L.tp1Src.join(', ') : ''} — close half, stop to entry</span></div>
+        <div class="plrow"><span class="g">Take profit 2</span><b class="mono g">${fmt(L.tp2)}</b><span class="muted sm">${L.rr2.toFixed(1)}R${L.tp2Src.length ? ' · ' + L.tp2Src.join(', ') : ''}</span></div>
+        <div class="plrow"><span>Size</span><b class="mono">${qty < 1 ? qty.toFixed(4) : qty.toFixed(3)} ${S.info.base}</b><span class="muted sm">${OF.fmtUsd(qty * L.entry)} notional · loses ${OF.fmtUsd(o.acct * o.risk / 100)} at the stop</span></div></div>`;
     };
-    const vcls = p.verdict === 'LONG' ? 'buy' : p.verdict === 'SHORT' ? 'sell' : 'wait';
-    top.innerHTML = `<div class="plsum"><span class="verdict ${vcls}">${p.verdict}</span>
-      <div><div class="dsc">${p.plan ? (p.side > 0 ? 'Buy' : 'Sell') + ' setup on the 1h chart · confidence ' + p.conf + '%' : 'No clean setup right now'}</div>
-      <div class="muted sm">${p.plan ? 'Most factors point ' + (p.side > 0 ? 'up' : 'down') + ' and the levels give at least ' + p.plan.rr1.toFixed(1) + 'R to the first target.' : 'Why: ' + p.why.join('; ') + '. Both conditional plans are below — wait for one to trigger.'}
-      Valid for the next ~4 hours; cancel an unfilled limit after that or if a 1h candle closes beyond the stop.</div></div></div>
-      <div class="plcards">${p.plan ? card(p.plan, true) + card(p.side > 0 ? p.short : p.long, false) : card(p.long, false) + card(p.short, false)}</div>`;
+    const condCard = pl => `<div class="plcard alt"><div class="plh"><b>Idea if it turns: ${pl.dir > 0 ? 'LONG' : 'SHORT'}</b><span class="muted sm">not active</span></div>
+        <div class="muted sm" style="margin-bottom:4px">Only after a 1h candle <b>closes ${pl.dir > 0 ? 'above' : 'below'} ${fmt(pl.trigger)}</b> and the bias turns ${pl.dir > 0 ? 'bullish' : 'bearish'} — then press ✚ New plan.</div>
+        <div class="plrow"><span>Entry area</span><b class="mono">${fmt(pl.entry)}</b><span class="muted sm">${pct(pl.entry)} from price</span></div>
+        <div class="plrow"><span class="r">Stop</span><b class="mono r">${fmt(pl.stop)}</b><span></span></div>
+        <div class="plrow"><span class="g">Targets</span><b class="mono g">${fmt(pl.tp1)}</b><span class="muted sm">then ${fmt(pl.tp2)} · ${pl.rr1.toFixed(1)}R / ${pl.rr2.toFixed(1)}R</span></div></div>`;
+    top.innerHTML = `<div class="plcards">${L ? lockedCard(L) + condCard(L.dir > 0 ? p.short : p.long) : condCard(p.long) + condCard(p.short)}</div>`;
     const zl = z => `<div class="zr"><b class="mono">${fmt(z.p)}</b><span class="zw" style="width:${Math.min(60, z.w * 9)}px"></span><span class="muted sm">${z.src.join(' · ')}</span></div>`;
     side.innerHTML = `<div class="sh">Resistance above (nearest first)</div>${p.res.slice(0, 7).map(zl).join('') || '<div class="muted pad">none within 6%</div>'}
       <div class="zr now"><b class="mono">${fmt(p.px)}</b><span class="muted sm">price now</span></div>
       <div class="sh">Support below (nearest first)</div>${p.sup.slice(0, 7).map(zl).join('') || '<div class="muted pad">none within 6%</div>'}`;
     const groups = [...new Set(p.factors.map(f => f.group))];
-    fac.innerHTML = '<h3>What the plan is based on</h3><table class="tbl"><thead><tr><th>Factor</th><th>Weight</th><th>Vote</th><th>Reading</th></tr></thead><tbody>' +
+    fac.innerHTML = '<h3>What the analysis is based on (live)</h3><table class="tbl"><thead><tr><th>Factor</th><th>Weight</th><th>Vote</th><th>Reading</th></tr></thead><tbody>' +
       groups.map(gp => p.factors.filter(f => f.group === gp).map(f => {
         const v = f.s == null ? '—' : f.s > 0.15 ? '<b class="g">▲ long</b>' : f.s < -0.15 ? '<b class="r">▼ short</b>' : '<span class="muted">neutral</span>';
         return `<tr><td>${f.name}</td><td class="mono muted">${f.w}</td><td>${v} <span class="mono muted sm">${f.s == null ? '' : (f.s * 100).toFixed(0)}</span></td><td class="wrap">${f.text}</td></tr>`;
       }).join('')).join('') + '</tbody></table>';
   },
   render() {
-    if (!this.p || Date.now() - this.p.at > 15000 || this.p.wait) { this.p = OF.tradePlan(); this.p.at = this.p.at || Date.now(); this.html(); }
-    const p = this.p, c = this.c.fit(), ctx = c.ctx, W = c.w, H = c.h, S = OF.S;
+    if (!this.p || Date.now() - this.p.at > 15000 || this.p.wait) { this.p = OF.tradePlan(); this.p.at = this.p.at || Date.now(); this.maybeLock(); this.html(); }
+    this.track();
+    if (!this._st || Date.now() - this._st > 1000) { this._st = Date.now(); this.status(); }
+    const p = this.p, c = this.c.fit(), ctx = c.ctx, W = c.w, H = c.h, S = OF.S, L = this.L;
     ctx.fillStyle = C.bg; ctx.fillRect(0, 0, W, H);
     if (!p || p.wait) { ui.msg(ctx, W, H, p ? p.wait : 'Loading…'); return; }
-    const k = S.k['1h'], AX = 80, TB = 18, pw = W - AX, ph = H - TB, n = Math.min(k.length, 72), i0 = k.length - n, bw = pw / (n + 14), X = i => (i - i0 + 0.5) * bw;
-    const pl = p.plan || (p.long.rr1 >= p.short.rr1 ? p.long : p.short);
-    let lo = Infinity, hi = -Infinity; for (let i = i0; i < k.length; i++) { lo = Math.min(lo, k[i].l); hi = Math.max(hi, k[i].h); }
-    [pl.stop, pl.tp1, pl.tp2, pl.entry].forEach(v => { lo = Math.min(lo, v); hi = Math.max(hi, v); });
+    const tf = this.o.ctf, k = S.k[tf]; if (!k || !k.length) { OF.loadKlines(tf); ui.msg(ctx, W, H, 'Loading ' + tf + ' candles…'); return; }
+    const ms = OF.tfMs[tf], AX = 80, TB = 18, pw = W - AX, ph = H - TB;
+    const n = Math.min(this.zv.n, k.length), end = Math.max(n, k.length - this.zv.off), i0 = Math.max(0, end - n);
+    const bw = pw / (n + Math.max(6, n * 0.18)), X = i => (i - i0 + 0.5) * bw; this.bw = bw;
+    const pl = L || (p.long.rr1 >= p.short.rr1 ? p.long : p.short), lv = L ? [L.entry, L.stopNow, L.stop, L.tp1, L.tp2] : [pl.entry, pl.stop, pl.tp1, pl.tp2];
+    let lo = Infinity, hi = -Infinity; for (let i = i0; i < end; i++) { lo = Math.min(lo, k[i].l); hi = Math.max(hi, k[i].h); }
+    lv.forEach(v => { lo = Math.min(lo, v); hi = Math.max(hi, v); });
     const pad = (hi - lo) * 0.05; lo -= pad; hi += pad;
     const Y = v => 6 + (ph - 12) - (v - lo) / (hi - lo) * (ph - 12);
     ui.priceAxis(ctx, 0, pw, 6, ph - 12, lo, hi);
-    ui.timeAxis(ctx, 0, n * bw, ph, k[i0].t, k[k.length - 1].t + 36e5, 90);
-    // zones
+    ui.timeAxis(ctx, 0, (end - i0) * bw, ph, k[i0].t, k[end - 1].t + ms, 90);
     for (const z of p.zones) {
       if (z.hi < lo || z.lo > hi) continue;
-      const a = Math.min(0.32, 0.05 + z.w * 0.035), y1 = Y(z.hi + p.atr * 0.06), y2 = Y(z.lo - p.atr * 0.06);
+      const a = Math.min(0.3, 0.05 + z.w * 0.033), y1 = Y(z.hi + p.atr * 0.06), y2 = Y(z.lo - p.atr * 0.06);
       ctx.fillStyle = (z.p > p.px ? 'rgba(239,68,68,' : 'rgba(34,197,94,') + a + ')'; ctx.fillRect(0, y1, pw, Math.max(2, y2 - y1));
-      if (z.w >= 2) { ctx.font = '10px ui-monospace,monospace'; ctx.fillStyle = '#cbd5e1'; ctx.textAlign = 'right'; ctx.textBaseline = 'middle'; ctx.fillText(OF.fp(z.p) + ' · ' + z.src.slice(0, 2).join(', '), pw - 4, (y1 + y2) / 2); }
+      if (z.w >= 2) { ctx.font = '10px ui-monospace,monospace'; ctx.fillStyle = '#cbd5e1'; ctx.textAlign = 'right'; ctx.textBaseline = 'middle'; ctx.fillText(OF.fp(z.p) + ' · ' + z.src.slice(0, 2).join(', '), pw * 0.62, (y1 + y2) / 2); }
     }
-    OF.drawCandles(ctx, k, i0, k.length, X, Y, bw * 0.65);
-    const e21 = OF.ema(k, 21); ctx.strokeStyle = C.blue; ctx.beginPath(); for (let i = i0; i < k.length; i++) i === i0 ? ctx.moveTo(X(i), Y(e21[i])) : ctx.lineTo(X(i), Y(e21[i])); ctx.stroke();
-    // plan box on the right of the last candle
-    const x0 = X(k.length - 1) + bw, x1 = pw - 4, ye = Y(pl.entry);
-    ctx.fillStyle = 'rgba(239,68,68,.18)'; ctx.fillRect(x0, Math.min(ye, Y(pl.stop)), x1 - x0, Math.abs(Y(pl.stop) - ye));
-    ctx.fillStyle = 'rgba(34,197,94,.18)'; ctx.fillRect(x0, Math.min(ye, Y(pl.tp2)), x1 - x0, Math.abs(Y(pl.tp2) - ye));
-    ui.hline(ctx, 0, pw, ye, '#e5e7eb', [], (p.plan ? '' : 'conditional ') + 'entry ' + OF.fp(pl.entry), x0);
-    ui.hline(ctx, 0, pw, Y(pl.stop), C.sell, [5, 3], 'stop ' + OF.fp(pl.stop), x0);
-    ui.hline(ctx, 0, pw, Y(pl.tp1), C.buy, [5, 3], 'TP1 ' + OF.fp(pl.tp1) + ' (' + pl.rr1.toFixed(1) + 'R)', x0);
-    ui.hline(ctx, 0, pw, Y(pl.tp2), C.buy, [2, 3], 'TP2 ' + OF.fp(pl.tp2) + ' (' + pl.rr2.toFixed(1) + 'R)', x0);
-    if (S.last) ui.tag(ctx, pw + 1, Y(S.last), OF.fp(S.last), '#e5e7eb', '#000');
+    OF.drawCandles(ctx, k, i0, end, X, Y, bw * 0.65);
+    const e21 = OF.ema(k, 21); ctx.strokeStyle = C.blue; ctx.beginPath(); for (let i = i0; i < end; i++) i === i0 ? ctx.moveTo(X(i), Y(e21[i])) : ctx.lineTo(X(i), Y(e21[i])); ctx.stroke();
+    if (OF.app.lines.liq) OF.drawLiqLines(ctx, pw, Y, lo, hi);
+    // plan box from creation time (or last candle) to the right edge
+    const tx = t => X(i0 + (t - k[i0].t) / ms - 0.5);
+    const x0 = Math.max(0, L ? tx(L.created) : X(end - 1) + bw), x1 = pw - 4, ye = Y(pl.entry), stopShown = L ? L.stopNow : pl.stop;
+    ctx.fillStyle = 'rgba(239,68,68,.16)'; ctx.fillRect(x0, Math.min(ye, Y(stopShown === pl.entry ? pl.stop : stopShown)), x1 - x0, Math.abs(Y(stopShown === pl.entry ? pl.stop : stopShown) - ye));
+    ctx.fillStyle = 'rgba(34,197,94,.16)'; ctx.fillRect(x0, Math.min(ye, Y(pl.tp2)), x1 - x0, Math.abs(Y(pl.tp2) - ye));
+    const tagX = Math.min(x0, pw - 260);
+    ui.hline(ctx, 0, pw, ye, '#e5e7eb', [], (L ? (L.state === 'waiting' ? 'ENTRY (waiting) ' : 'ENTRY ') : 'idea entry ') + OF.fp(pl.entry), tagX);
+    ui.hline(ctx, 0, pw, Y(stopShown), C.sell, [5, 3], 'STOP ' + OF.fp(stopShown) + (L && L.stopNow !== L.stop ? ' (moved)' : ''), tagX);
+    ui.hline(ctx, 0, pw, Y(pl.tp1), C.buy, [5, 3], 'TP1 ' + OF.fp(pl.tp1) + ' (' + pl.rr1.toFixed(1) + 'R)', tagX);
+    ui.hline(ctx, 0, pw, Y(pl.tp2), C.buy, [2, 3], 'TP2 ' + OF.fp(pl.tp2) + ' (' + pl.rr2.toFixed(1) + 'R)', tagX);
+    if (L && L.filledAt) { ctx.beginPath(); ctx.arc(tx(L.filledAt), ye, 5, 0, 7); ctx.fillStyle = '#fff'; ctx.fill(); }
+    if (S.last) { ui.hline(ctx, 0, pw, Y(S.last), 'rgba(229,231,235,.5)', [1, 3]); ui.tag(ctx, pw + 1, Y(S.last), OF.fp(S.last), '#e5e7eb', '#000'); }
     ctx.font = '11px ui-monospace,monospace'; ctx.fillStyle = C.muted; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
-    ctx.fillText(S.symbol + ' · 1h · shaded = price zones (green support, red resistance; darker = more sources agree)', 8, 8);
-    ui.cross(ctx, this.mouse, 0, pw, 6, ph - 12, lo, hi, pw + 1);
+    ctx.fillText(S.symbol + ' · ' + tf + ' · scroll = zoom · drag = pan · double-click = reset · green zones support, red resistance', 8, 8);
+    ui.cross(ctx, this.mouse, 0, pw, 6, ph - 12, lo, hi, pw + 1, x => k[i0].t + (x / bw) * ms);
   }
 };
 })();
