@@ -2,7 +2,9 @@
 
 A single-page terminal that runs entirely in your browser from free public exchange data. No server, no API keys, no login.
 
-**Tabs:** Chart · Heatmap · Footprint · Whales · Vol profile · TPO · Gamma · Tape · L3 events · Futures · Sentiment · Guide
+**Tabs:** Chart · Heatmap · Footprint · Whales · Vol profile · TPO · Gamma · Tape · L3 events · Futures · Sentiment · **Trade plan** · Guide
+**Lines (header):** Plan · Walls (biggest order-book walls with price) · Liq (estimated liquidation clusters with price) · Γ (options gamma levels)
+**Mouse:** move over any chart or its price scale to read the exact price and % distance from the current price.
 **Right panel:** Decision (BUY / SELL / WAIT from the order-flow meters, with trigger levels) + DOM ladder + mini tape.
 **Keys:** `1`–`9`, `0` switch tabs · `P` shows / hides the right panel.
 
@@ -33,6 +35,9 @@ To update later, upload the changed files again; Pages redeploys automatically.
 - Pulls, icebergs, spoofing and liquidation clusters are inferred from public data, so treat them as context.
 - If Binance is blocked on your network the header shows OFFLINE; try another network or the demo.
 - Nothing here is financial advice.
+
+## Trade plan tab
+Combines 12 factors (4h and 1h trend, 1h structure, RSI, VWAP/value area, live order flow, 1h+4h delta, whales over 4h, book walls, fake walls, liquidation clusters, funding/OI, options gamma) into a bias, merges ~25 level sources into price zones, then builds one 1h intraday setup: entry at the strongest nearby zone, stop beyond it (0.6–2× ATR), TP1/TP2 at the next opposing zones. If the factors disagree or reward is under 1.3R it says NO TRADE and shows both conditional plans. Set your account size and risk % for position size. Rules live in `js/planner.js`.
 
 ## Where to tune things
 - `js/metrics.js` → `WEIGHTS` and `OF.verdictFrom()` decide how the Decision panel turns meters into BUY / SELL / WAIT.

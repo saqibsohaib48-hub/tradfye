@@ -6,14 +6,15 @@ const OF = window.OF, C = OF.C, el = OF.el, ui = OF.ui, LS = OF.LS;
 /* ===================== HEATMAP ===================== */
 OF.views.heatmap = {
   label: 'Heatmap', title: 'Liquidity heatmap — resting orders over time, with trades as bubbles',
-  o: Object.assign({ span: 120, range: 0, contrast: 1, bubbles: 'auto' }, LS.get('hm', {})),
+  o: Object.assign({ span: 120, range: 0, contrast: 1, bubbles: 'auto', marks: 'pulls' }, LS.get('hm', {})),
   toolbar(tb) {
     const o = this.o, save = () => LS.set('hm', o);
     tb.append(
       ui.seg('Span', [[60, '1m'], [120, '2m'], [300, '5m'], [720, '12m'], [900, '15m'], [1800, '30m'], [3600, '1h'], [14400, '4h']], o.span, v => { o.span = v; save(); }, 'How much history is on screen. Up to 30 min uses 0.5-second columns; 1h/4h use 5-second columns. History starts when you open the page.'),
       ui.seg('Price range', [[0, 'Auto'], [0.1, '±0.1%'], [0.25, '±0.25%'], [0.5, '±0.5%'], [1, '±1%']], o.range, v => { o.range = v; save(); }),
       ui.seg('Contrast', [[0, 'Low'], [1, 'Med'], [2, 'High']], o.contrast, v => { o.contrast = v; save(); }),
-      ui.seg('Bubbles', [['auto', 'Auto'], ['all', 'Trades'], ['off', 'Off']], o.bubbles, v => { o.bubbles = v; save(); }, 'Auto shows only the larger 0.5-second trade clusters; Trades shows all of them.'));
+      ui.seg('Bubbles', [['auto', 'Auto'], ['all', 'Trades'], ['off', 'Off']], o.bubbles, v => { o.bubbles = v; save(); }, 'Trades are grouped into short time slots (about 14 px wide) so bubbles do not overlap. Auto hides the smallest 60 %; Trades shows all.'),
+      ui.seg('Markers', [['pulls', 'Pulls'], ['all', 'Pulls + adds'], ['off', 'Off']], o.marks, v => { o.marks = v; save(); }, '✕ = a large order pulled without trading, + = a large order added. Only the biggest 10 % in view are drawn (max 40).'));
   },
   mount(v) {
     this.c = ui.canvas(v);
@@ -55,56 +56,77 @@ OF.views.heatmap = {
       if (ci % (step * 4) === 0) for (let r = 0; r < nR; r++) if (g[r]) sample.push(g[r]);
     }
     const ref = OF.pctile(sample, 0.97) || 1, gm = [0.8, 0.55, 0.35][o.contrast];
-    const colPx = (coarse ? 5000 : 500) * step / spanMs * pw + 0.6;
-    for (const [t, g] of grid) {
-      const x = X(t);
+    const base = (coarse ? 5000 : 500) * step, pxPerMs = pw / spanMs;
+    for (let gi = 0; gi < grid.length; gi++) {
+      const [t, g] = grid[gi];
+      // stretch each column to the next one (fills gaps when the browser throttled a background tab), max 10 s
+      const nt = gi + 1 < grid.length ? grid[gi + 1][0] : t + base;
+      const x = X(t), w = Math.min(nt - t, 10000) * pxPerMs + 0.6;
       for (let r = 0; r < nR; r++) {
         const v = g[r]; if (!v) continue;
         const f = Math.pow(Math.min(1, v / ref), gm); if (f < 0.03) continue;
         ctx.fillStyle = OF.heatLUT[Math.round(f * 255)];
-        ctx.fillRect(x, Y((r0 + r + 1) * rb), colPx, rh + 0.5);
+        ctx.fillRect(x, Y((r0 + r + 1) * rb), w, rh + 0.5);
       }
     }
     this.geo = { lo, hi, t0, spanMs, pw, ph, rb, r0, grid };
-    // legend
-    ctx.fillStyle = 'rgba(10,13,18,.85)'; ctx.fillRect(6, 6, 250, 30);
-    for (let i = 0; i < 120; i++) { ctx.fillStyle = OF.heatLUT[Math.round(i / 119 * 255)]; ctx.fillRect(10 + i, 10, 1, 8); }
-    ctx.font = '10px ui-monospace,monospace'; ctx.fillStyle = C.muted; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
-    ctx.fillText('≤' + OF.fmtUsd(ref * 0.05) + ' … ' + OF.fmtUsd(ref) + '+', 134, 9);
-    ctx.fillText((coarse ? '5-second' : '0.5-second') + ' book columns · trades at their price', 10, 22);
-    // L3 markers
-    const evs = S.events, ei = OF.lb(evs, t0), mk = S.l3Min * 2;
-    ctx.lineWidth = 1.5; ctx.font = 'bold 10px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    for (let i = ei; i < evs.length; i++) {
-      const e = evs[i]; if (e.n < mk || e.p < lo || e.p > hi) continue;
-      if (e.type !== 'pull' && e.type !== 'add') continue;
-      const x = X(e.t), y = Y(e.p), col = e.side === 'bid' ? C.buy : C.sell;
-      ctx.beginPath(); ctx.arc(x, y, 6, 0, 7); ctx.fillStyle = e.type === 'pull' ? col : 'rgba(0,0,0,0)'; ctx.fill(); ctx.strokeStyle = col; ctx.stroke();
-      ctx.fillStyle = e.type === 'pull' ? '#fff' : col; ctx.fillText(e.type === 'pull' ? '✕' : '+', x, y + 0.5);
-    }
-    // trade bubbles
-    if (o.bubbles !== 'off') {
-      const bs = S.bubbles, bi = OF.lb(bs, t0); let mx = 0; const sz = [];
-      for (let i = bi; i < bs.length; i++) { const b = bs[i]; mx = Math.max(mx, b.bn, b.sn); sz.push(b.bn + b.sn); }
-      const min = o.bubbles === 'auto' ? OF.pctile(sz, 0.75) : 0, R = Math.min(24, Math.max(10, ph / 28));
-      for (let i = bi; i < bs.length; i++) {
-        const b = bs[i], x = X(b.t + 250);
-        for (const side of ['b', 's']) {
-          const n = b[side + 'n']; if (!n || n < min) continue;
-          const p = b[side + 'pq'] / n; if (p < lo || p > hi) continue;
-          const r = Math.max(2, Math.sqrt(n / mx) * R);
-          ctx.beginPath(); ctx.arc(x, Y(p), r, 0, 7);
-          ctx.fillStyle = side === 'b' ? C.buyA + '.75)' : C.sellA + '.75)'; ctx.fill();
-          ctx.strokeStyle = side === 'b' ? '#86efac' : '#fca5a5'; ctx.lineWidth = 1; ctx.stroke();
-        }
+    // L3 markers: only the biggest pulls in view (and adds if asked), small so bubbles stay readable
+    if (o.marks !== 'off') {
+      const evs = S.events, ei = OF.lb(evs, t0), cand = [];
+      for (let i = ei; i < evs.length; i++) {
+        const e = evs[i]; if (e.p < lo || e.p > hi) continue;
+        if (e.type === 'pull' || (o.marks === 'all' && e.type === 'add')) cand.push(e);
+      }
+      const floor = Math.max(S.l3Min * 3, OF.pctile(cand.map(e => e.n), 0.9));
+      const show = cand.filter(e => e.n >= floor).sort((a, b) => b.n - a.n).slice(0, 40);
+      ctx.lineWidth = 1.2; ctx.font = 'bold 8px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      for (const e of show) {
+        const x = X(e.t), y = Y(e.p), col = e.side === 'bid' ? C.buy : C.sell;
+        ctx.beginPath(); ctx.arc(x, y, 4.5, 0, 7);
+        ctx.fillStyle = e.type === 'pull' ? col : 'rgba(0,0,0,.6)'; ctx.fill(); ctx.strokeStyle = '#0a0d12'; ctx.stroke();
+        ctx.fillStyle = e.type === 'pull' ? '#fff' : col; ctx.fillText(e.type === 'pull' ? '✕' : '+', x, y + 0.5);
       }
     }
+    // trade bubbles: merge 0.5-s buckets into ~14-px time slots so bubbles never pile on top of each other
+    if (o.bubbles !== 'off') {
+      const slotMs = Math.max(500, Math.round(14 / pxPerMs / 500) * 500), slots = new Map();
+      const bs = S.bubbles;
+      for (let i = OF.lb(bs, t0); i < bs.length; i++) {
+        const b = bs[i], k = Math.floor(b.t / slotMs) * slotMs;
+        let s = slots.get(k); if (!s) { s = { t: k, bn: 0, bpq: 0, sn: 0, spq: 0 }; slots.set(k, s); }
+        s.bn += b.bn; s.bpq += b.bpq; s.sn += b.sn; s.spq += b.spq;
+      }
+      const list = []; let mx = 0;
+      for (const s of slots.values()) for (const side of ['b', 's']) {
+        const n = s[side + 'n']; if (!n) continue; const p = s[side + 'pq'] / n;
+        if (p < lo || p > hi) continue; list.push({ t: s.t, n, p, buy: side === 'b' }); if (n > mx) mx = n;
+      }
+      const min = o.bubbles === 'auto' ? OF.pctile(list.map(x => x.n), 0.6) : 0, R = OF.clamp(ph / 22, 10, 26);
+      list.sort((a, b) => b.n - a.n);   // big first, small drawn on top
+      for (const b of list) {
+        if (b.n < min) continue;
+        const r = Math.max(2.5, Math.sqrt(b.n / mx) * R), x = X(b.t + slotMs / 2), y = Y(b.p);
+        ctx.beginPath(); ctx.arc(x, y, r, 0, 7);
+        ctx.fillStyle = b.buy ? 'rgba(34,197,94,.55)' : 'rgba(239,68,68,.55)'; ctx.fill();
+        ctx.strokeStyle = b.buy ? '#bbf7d0' : '#fecaca'; ctx.lineWidth = r > 8 ? 1.5 : 1; ctx.stroke();
+        if (r >= 14) { ctx.fillStyle = '#fff'; ctx.font = 'bold 10px ui-monospace,monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(OF.fmtUsd(b.n).replace('$', ''), x, y); }
+      }
+      this.bubbleSlot = slotMs;
+    }
+    // legend (bottom-left, out of the way of the plan labels)
+    ctx.fillStyle = 'rgba(10,13,18,.85)'; ctx.fillRect(6, ph - 36, 270, 30);
+    for (let i = 0; i < 120; i++) { ctx.fillStyle = OF.heatLUT[Math.round(i / 119 * 255)]; ctx.fillRect(10 + i, ph - 32, 1, 8); }
+    ctx.font = '10px ui-monospace,monospace'; ctx.fillStyle = C.muted; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+    ctx.fillText('≤' + OF.fmtUsd(ref * 0.05) + ' … ' + OF.fmtUsd(ref) + '+ resting', 134, ph - 33);
+    ctx.fillText((coarse ? '5-s' : '0.5-s') + ' book columns · bubbles = trades per ' + ((this.bubbleSlot || 500) / 1000) + ' s', 10, ph - 20);
     // plan lines
     const d = OF.lastDecision;
     if (OF.app.lines.plan && d && d.plan) {
       if (d.plan.buyAbove && d.plan.buyAbove < hi) ui.hline(ctx, 0, pw, Y(d.plan.buyAbove), C.buy, [2, 3], '▲ buy above ' + OF.fp(d.plan.buyAbove));
       if (d.plan.sellBelow && d.plan.sellBelow > lo) ui.hline(ctx, 0, pw, Y(d.plan.sellBelow), C.sell, [2, 3], '▼ sell below ' + OF.fp(d.plan.sellBelow), 0);
     }
+    if (OF.app.lines.liq) OF.drawLiqLines(ctx, pw, Y, lo, hi);
+    if (OF.app.lines.gamma) OF.drawGammaLines(ctx, pw, Y, lo, hi);
     // book on the right
     ctx.fillStyle = C.panel; ctx.fillRect(pw, 0, BK, ph);
     const bk = OF.bookBins(Math.max(0.05, (hi - lo) / mid * 60), rb); let bmx = 0;
@@ -123,10 +145,10 @@ OF.views.heatmap = {
     // last price
     if (S.last) { const y = Y(S.last); ui.hline(ctx, 0, pw + BK, y, '#e5e7eb', [3, 3]); ui.tag(ctx, pw + BK + 1, y, OF.fp(S.last), '#e5e7eb', '#000'); }
     // hover
+    const cp = ui.cross(ctx, this.mouse, 0, pw + BK, 0, ph, lo, hi, pw + BK + 1, x => x < pw ? t0 + x / pw * spanMs : null);
+    if (cp == null || this.mouse.x >= pw) ui.tip();
     if (this.mouse && this.mouse.x < pw && this.mouse.y < ph) {
       const m = this.mouse, p = lo + (ph - m.y) / ph * (hi - lo), t = t0 + m.x / pw * spanMs;
-      ctx.strokeStyle = 'rgba(255,255,255,.25)'; ctx.setLineDash([2, 3]);
-      ctx.beginPath(); ctx.moveTo(m.x, 0); ctx.lineTo(m.x, ph); ctx.moveTo(0, m.y); ctx.lineTo(pw, m.y); ctx.stroke(); ctx.setLineDash([]);
       let best = null; for (const gr of grid) if (!best || Math.abs(gr[0] - t) < Math.abs(best[0] - t)) best = gr;
       const r = Math.floor(p / rb) - r0, v = best ? best[1][r] : 0;
       ui.tip(m.cx, m.cy, `<b>${OF.fp(Math.floor(p / rb) * rb)}</b> · ${OF.hm(t, true)}<br>resting ${OF.fmtUsd(v || 0)}`);
@@ -217,6 +239,7 @@ OF.views.chart = {
     if (o.gamma || OF.app.lines.gamma) OF.drawGammaLines(ctx, pw, Y, lo, hi);
     if (OF.app.lines.plan) OF.drawPlanLines(ctx, pw, Y, lo, hi);
     if (OF.app.lines.liq) OF.drawLiqLines(ctx, pw, Y, lo, hi);
+    if (OF.app.lines.walls) OF.drawWallLines(ctx, pw, Y, lo, hi);
     // drawings
     const draws = LS.get('draw:' + S.symbol, []).concat(this.draft ? [this.draft] : []);
     ctx.strokeStyle = '#e5e7eb'; ctx.lineWidth = 1.2;
@@ -246,7 +269,8 @@ OF.views.chart = {
     legend.forEach(([col, t], i) => { ctx.fillStyle = col; ctx.fillRect(10, 26 + i * 15, 8, 8); ctx.fillStyle = C.muted; ctx.fillText(t, 24, 24 + i * 15); });
     if (this.mouse && this.mouse.y < mainH) {
       ctx.strokeStyle = 'rgba(255,255,255,.25)'; ctx.setLineDash([2, 3]); ctx.beginPath(); ctx.moveTo(this.mouse.x, 0); ctx.lineTo(this.mouse.x, H - TB); ctx.moveTo(0, this.mouse.y); ctx.lineTo(pw, this.mouse.y); ctx.stroke(); ctx.setLineDash([]);
-      const p = fi(f(lo) + ((mainH - volH) - this.mouse.y) / (mainH - volH - 10) * (f(hi) - f(lo))); ui.tag(ctx, pw + 1, this.mouse.y, OF.fp(p), '#374151', '#fff');
+      const p = fi(f(lo) + ((mainH - volH) - this.mouse.y) / (mainH - volH - 10) * (f(hi) - f(lo))); ui.tag(ctx, pw + 1, this.mouse.y, OF.fp(p), '#2563eb', '#fff');
+      if (S.last) { const dd = (p / S.last - 1) * 100; ctx.fillStyle = '#93c5fd'; ctx.textAlign = 'right'; ctx.textBaseline = 'bottom'; ctx.fillText((dd >= 0 ? '+' : '') + dd.toFixed(2) + '% from price', pw - 4, this.mouse.y - 3); ctx.textAlign = 'left'; ctx.textBaseline = 'top'; }
     }
     if (this.tool) { ctx.fillStyle = C.amber; ctx.fillText(this.tool === 'hline' ? 'Click to place a level' : (this.draft ? 'Click the second point' : 'Click the first point'), pw / 2 - 60, 6); }
     this.geo = { bw, tAt: x => tStart + (x / bw - 0.5 + 0.5) * ms, pAt: y => fi(f(lo) + ((mainH - volH) - y) / (mainH - volH - 10) * (f(hi) - f(lo))) };
@@ -268,7 +292,20 @@ OF.drawGammaLines = (ctx, pw, Y, lo, hi) => {
 OF.drawLiqLines = (ctx, pw, Y, lo, hi) => {
   const m = OF.liqMap(); if (!m || !m.rows.length) return;
   const top = m.rows.filter(r => r.p > lo && r.p < hi).sort((a, b) => (b.long + b.short) - (a.long + a.short)).slice(0, 4);
-  for (const r of top) ui.hline(ctx, 0, pw, Y(r.p + m.bin / 2), r.p > m.mid ? C.buy : C.sell, [1, 4], 'est. liq ' + OF.fmtUsd(r.long + r.short), pw - 140);
+  for (const r of top) { const p = r.p + m.bin / 2; ui.hline(ctx, 0, pw, Y(p), r.p > m.mid ? C.buy : C.sell, [1, 4], (r.p > m.mid ? 'short liq ' : 'long liq ') + OF.fp(p) + ' · ' + OF.fmtUsd(r.long + r.short), pw - 230); }
+};
+/* resting order-book liquidity: biggest bid / ask walls within ±3 % */
+OF.drawWallLines = (ctx, pw, Y, lo, hi) => {
+  const S = OF.S; if (!S || !S.synced) return;
+  const mid = OF.mid(), bb = OF.bookBins(3, OF.niceStep(mid * 0.0008)), out = [];
+  for (const [p, n] of bb.b) out.push({ p: p + bb.bin / 2, n, bid: true }); for (const [p, n] of bb.a) out.push({ p: p + bb.bin / 2, n, bid: false });
+  const pick = side => out.filter(w => w.bid === side && w.p > lo && w.p < hi).sort((a, b) => b.n - a.n).slice(0, 4);
+  const all = pick(true).concat(pick(false)); let mx = 0; for (const w of all) mx = Math.max(mx, w.n);
+  for (const w of all) {
+    const y = Y(w.p), col = w.bid ? C.buy : C.sell, len = 30 + w.n / mx * 90;
+    ctx.fillStyle = w.bid ? C.buyA + '.55)' : C.sellA + '.55)'; ctx.fillRect(pw - len, y - 2, len, 4);
+    ui.hline(ctx, 0, pw, y, col, [8, 3], (w.bid ? 'bid wall ' : 'ask wall ') + OF.fp(w.p) + ' · ' + OF.fmtUsd(w.n), pw * 0.42);
+  }
 };
 
 /* ===================== FOOTPRINT ===================== */
@@ -283,7 +320,7 @@ OF.views.footprint = {
       ui.seg('Rows', [[0, 'Auto'], [1, '1×'], [2, '2×'], [5, '5×'], [10, '10×']], o.rows, v => { o.rows = v; save(); }, 'Price height of each row. Auto picks about 12 rows per candle.'),
       ui.seg('Units', [['$', '$'], ['base', 'Coin']], o.units, v => { o.units = v; save(); }));
   },
-  mount(v) { this.c = ui.canvas(v); this.c.cv.onmousemove = e => { const r = this.c.cv.getBoundingClientRect(); this.mouse = { x: e.clientX - r.left, y: e.clientY - r.top }; }; this.c.cv.onmouseleave = () => this.mouse = null; },
+  mount(v) { this.c = ui.canvas(v); ui.track(this); },
   build() {
     const S = OF.S, o = this.o, ms = OF.tfMs[o.tf], tr = S.trades;
     if (!tr.length) return null;
@@ -381,7 +418,8 @@ OF.views.footprint = {
     ['Volume', 'Delta', 'Delta %', 'Cum Δ', 'Time'].forEach((t, j) => { ctx.fillStyle = C.muted; ctx.fillText(t, W - 6, H - TBL + 12 + j * 18); });
     if (S.histFrom && cs[0] && cs[0].t <= S.histFrom) { ctx.fillStyle = C.amber; ctx.textAlign = 'left'; ctx.fillText('◂ trades recorded from ' + OF.hm(S.histFrom), 6, TOP + ph - 6); }
     if (S.last) { const y = Y(S.last); ui.tag(ctx, pw + 1, y, OF.fp(S.last), '#e5e7eb', '#000'); }
-    ctx.fillStyle = C.muted; ctx.textAlign = 'right'; ctx.fillText('rows ' + OF.fp(bin) + ' · ' + o.tf + ' candles · ' + (o.units === '$' ? '$ volume' : S.info.base), pw - 6, 12);
+    ui.cross(ctx, this.mouse, 0, pw, TOP, ph, lo, hi, pw + 1);
+    ctx.font = '10px ui-monospace,monospace'; ctx.fillStyle = C.muted; ctx.textAlign = 'right'; ctx.fillText('rows ' + OF.fp(bin) + ' · ' + o.tf + ' candles · ' + (o.units === '$' ? '$ volume' : S.info.base), pw - 6, 12);
   }
 };
 
@@ -400,7 +438,7 @@ OF.views.whales = {
       ui.toggle('Whale avg', o.avg, v => { o.avg = v; save(); }), ui.toggle('Zones', o.zones, v => { o.zones = v; save(); }), ui.toggle('Vol profile', o.vp, v => { o.vp = v; save(); }));
     this.sizeSpan = el('span', 'lbl mono', ''); tb.append(this.sizeSpan);
   },
-  mount(v) { this.c = ui.canvas(v); },
+  mount(v) { this.c = ui.canvas(v); ui.track(this); },
   thr() { const S = OF.S; return this.o.size === 'auto' ? (S.whaleThr || 50000) : +this.o.size; },
   data() {
     const S = OF.S, from = S.trades.length ? S.trades[0].t : OF.now();
@@ -455,12 +493,13 @@ OF.views.whales = {
       if (a.n >= mx * 0.25) { ctx.font = 'bold 11px ui-monospace,monospace'; ctx.fillStyle = '#e5e7eb'; ctx.fillText(OF.fmtUsd(a.n), x, y - r - 7); }
     }
     if (o.avg) {
-      if (d.bAvg) ui.hline(ctx, 0, pw, Y(d.bAvg), '#e5e7eb', [6, 3], '🐋 buyers’ avg ' + OF.fp(d.bAvg) + ' (price ' + ((S.last / d.bAvg - 1) * 100).toFixed(2) + '%)');
-      if (d.sAvg) ui.hline(ctx, 0, pw, Y(d.sAvg), C.muted, [2, 3], '🐋 sellers’ avg ' + OF.fp(d.sAvg) + ' (price ' + ((S.last / d.sAvg - 1) * 100).toFixed(2) + '%)');
+      if (d.bAvg) ui.hline(ctx, 0, pw, Y(d.bAvg), '#e5e7eb', [6, 3], '🐋 buyers’ avg ' + OF.fp(d.bAvg) + ' (price ' + ((S.last / d.bAvg - 1) * 100).toFixed(2) + '%)', pw * 0.18);
+      if (d.sAvg) ui.hline(ctx, 0, pw, Y(d.sAvg), C.muted, [2, 3], '🐋 sellers’ avg ' + OF.fp(d.sAvg) + ' (price ' + ((S.last / d.sAvg - 1) * 100).toFixed(2) + '%)', pw * 0.18);
     }
     if (OF.app.lines.plan) OF.drawPlanLines(ctx, pw, Y, lo, hi);
     if (OF.app.lines.gamma) OF.drawGammaLines(ctx, pw, Y, lo, hi);
     if (OF.app.lines.liq) OF.drawLiqLines(ctx, pw, Y, lo, hi);
+    if (OF.app.lines.walls) OF.drawWallLines(ctx, pw, Y, lo, hi);
     // whale volume by price on the right
     if (o.vp) {
       const zb = OF.niceStep((hi - lo) / 50), zm = new Map(); for (const w of d.list) { const kk = Math.floor(w.p / zb) * zb; const r = zm.get(kk) || [0, 0]; r[w.buy ? 0 : 1] += w.n; zm.set(kk, r); }
@@ -468,6 +507,7 @@ OF.views.whales = {
       for (const [p, r] of zm) { const wb = r[0] / m2 * (VP - 4), ws = r[1] / m2 * (VP - 4); ctx.fillStyle = C.buyA + '.7)'; ctx.fillRect(pw + 2, Y(p + zb), wb, Y(p) - Y(p + zb) - 1); ctx.fillStyle = C.sellA + '.7)'; ctx.fillRect(pw + 2 + wb, Y(p + zb), ws, Y(p) - Y(p + zb) - 1); }
     }
     if (S.last) ui.tag(ctx, pw + VP + 1, Y(S.last), OF.fp(S.last), '#e5e7eb', '#000');
+    ui.cross(ctx, this.mouse, 0, pw + VP, 8, mainH - 16, lo, hi, pw + VP + 1, x => tStart + (x / bw) * ms);
     // bottom: bubble net per candle + everyone-else cumulative
     const top = mainH + volH; ctx.fillStyle = C.panel; ctx.fillRect(0, top, W, netH);
     const nets = new Map(); for (const a of agg.values()) nets.set(a.t, (nets.get(a.t) || 0) + (a.buy ? a.n : -a.n));

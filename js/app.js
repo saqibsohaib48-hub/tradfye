@@ -2,8 +2,8 @@
 (function () {
 'use strict';
 const OF = window.OF, C = OF.C, el = OF.el, ui = OF.ui, LS = OF.LS, $ = id => document.getElementById(id);
-const ORDER = ['chart', 'heatmap', 'footprint', 'whales', 'profile', 'tpo', 'gamma', 'tape', 'liquidity', 'futures', 'sentiment', 'guide'];
-OF.app = { tf: LS.get('tf', '1m'), lines: Object.assign({ plan: true, gamma: false, liq: false }, LS.get('lines', {})), view: LS.get('view', 'heatmap'), panel: LS.get('panel', window.innerWidth > 1000) };
+const ORDER = ['chart', 'heatmap', 'footprint', 'whales', 'profile', 'tpo', 'gamma', 'tape', 'liquidity', 'futures', 'sentiment', 'plan', 'guide'];
+OF.app = { tf: LS.get('tf', '1m'), lines: Object.assign({ plan: true, gamma: false, liq: true, walls: true }, LS.get('lines', {})), view: LS.get('view', 'heatmap'), panel: LS.get('panel', window.innerWidth > 1000) };
 const A = OF.app;
 
 /* ---------- header ---------- */
@@ -13,7 +13,7 @@ function buildHeader() {
   const ls = $('linesSeg'); ls.innerHTML = '';
   const g = el('div', 'grp'); g.appendChild(el('span', 'lbl', 'Lines'));
   const s = el('div', 'seg');
-  [['plan', 'Plan', 'Decision panel trigger levels'], ['gamma', 'Γ', 'Options gamma levels (Deribit)'], ['liq', 'Liq', 'Estimated liquidation clusters']].forEach(([k, t, title]) => {
+  [['plan', 'Plan', 'Decision panel trigger levels'], ['walls', 'Walls', 'Biggest resting bid / ask walls in the order book (±3%) with price and size'], ['liq', 'Liq', 'Estimated liquidation clusters with price and size'], ['gamma', 'Γ', 'Options gamma levels (Deribit)']].forEach(([k, t, title]) => {
     const b = el('button', A.lines[k] ? 'on' : '', t); b.title = title;
     b.onclick = () => { A.lines[k] = !A.lines[k]; b.classList.toggle('on', A.lines[k]); LS.set('lines', A.lines); if (k === 'gamma' && A.lines[k]) OF.loadGamma(); };
     s.appendChild(b);
@@ -43,7 +43,7 @@ function pick(sym) {
 }
 function startSymbol(sym) {
   $('symBtn').textContent = sym.replace(/USDT$/, '/USDT') + ' ▾';
-  OF.start(sym).then(() => { if (!OF.S.info) return; ['1m', '5m', '15m', '30m', '1h', '4h', '1d'].forEach(tf => OF.loadKlines(tf)); });
+  OF.start(sym).then(() => { if (!OF.S.info) return; ['1m', '5m', '15m', '30m', '1h', '4h', '12h', '1d'].forEach(tf => OF.loadKlines(tf)); });
   mountView(true);
 }
 
@@ -130,15 +130,33 @@ function renderDom() {
 }
 function applyPanel() { document.body.classList.toggle('nopanel', !A.panel); LS.set('panel', A.panel); }
 
+/* ---------- multi-timeframe direction bar ---------- */
+function renderMtf() {
+  const m = OF.mtf(), box = $('mtf'); if (!m) return;
+  const pc = v => (v >= 0 ? '+' : '') + Math.round(v * 100);
+  const chip = r => {
+    if (r.score == null) return `<span class="mchip"><b>${r.tf}</b> <span class="muted">loading</span></span>`;
+    const c = r.score > 15 ? 'up' : r.score < -15 ? 'dn' : 'flat', arrow = r.score > 15 ? '▲' : r.score < -15 ? '▼' : '◆';
+    const word = r.score > 55 ? 'Strong up' : r.score > 15 ? 'Up' : r.score < -55 ? 'Strong down' : r.score < -15 ? 'Down' : 'Sideways';
+    const tip = `${r.tf}: score ${r.score}\ntrend ${pc(r.trend)} (price ${OF.S.last > r.ema21 ? 'above' : 'below'} EMA21 ${OF.fp(r.ema21)})\ncandle delta ${pc(r.delta)}\nmomentum ${pc(r.mom)}` + (r.flow != null ? `\nlive trade flow ${pc(r.flow)}` : '');
+    return `<span class="mchip ${c}" title="${tip}"><b>${r.tf}</b> ${arrow} ${word} <span class="mono">${Math.abs(r.score)}</span><i style="width:${Math.min(100, Math.abs(r.score))}%"></i></span>`;
+  };
+  const o = m.overall, oc = o == null ? '' : o > 15 ? 'up' : o < -15 ? 'dn' : 'flat';
+  const ow = o == null ? 'loading' : o > 15 ? 'BULLISH' : o < -15 ? 'BEARISH' : 'MIXED';
+  const n = m.rows.filter(r => r.score != null).length;
+  const msg = o == null ? '' : m.up === n ? 'all timeframes up' : m.dn === n ? 'all timeframes down' : m.up && m.dn ? 'short and long timeframes disagree — trade smaller or wait' : 'leaning ' + (o > 0 ? 'up' : 'down');
+  box.innerHTML = `<span class="lbl">Market direction</span>${m.rows.map(chip).join('')}<span class="mchip ov ${oc}" title="Weighted: 1m 0.5 · 5m 0.8 · 15m 1 · 1h 1.2 · 4h 1.2 · 12h 1"><b>Overall</b> ${ow} <span class="mono">${o == null ? '' : Math.abs(o)}</span></span><span class="muted sm">${m.up}▲ ${m.dn}▼ · ${msg}</span>`;
+}
+
 /* ---------- loop ---------- */
 let n = 0;
 function tick(force) {
   n++;
   const S = OF.S; if (!S) return;
-  if (force || n % 4 === 0) { try { OF.lastDecision = OF.decision(); } catch (e) { console.error(e); } updateHeader(); }
+  if (force || n % 4 === 0) { try { OF.lastDecision = OF.decision(); } catch (e) { console.error(e); } updateHeader(); try { renderMtf(); } catch (e) { console.error(e); } }
   const v = cur; if (!v) return;
   const isCanvas = !!v.c;
-  if (force || isCanvas || n % 2 === 0) { try { v.render(); } catch (e) { console.error(e); } }
+  if (force || isCanvas || n % 2 === 0) { ui.lblReset(); try { v.render(); } catch (e) { console.error(e); } }
   if (v.reading && (force || n % 4 === 0)) { try { $('reading').innerHTML = v.reading(); } catch (e) {} }
   if (A.panel && (force || n % 2 === 0)) { renderDecision(); renderDom(); }
 }

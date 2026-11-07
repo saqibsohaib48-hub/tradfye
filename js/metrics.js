@@ -182,6 +182,35 @@ OF.liqMap = function () {
   return { rows, bin, mid, shortsAbove3: up, longsBelow3: dn };
 };
 
+/* ---------- multi-timeframe direction (shown on every tab) ----------
+   Per timeframe: trend (close vs EMA21, EMA21 vs EMA50), candle delta (taker buy − sell, current blended
+   with previous), momentum (last 3 candles vs ATR); 1m/5m/15m also include live trade flow. */
+OF.MTF = ['1m', '5m', '15m', '1h', '4h', '12h'];
+OF.mtf = function () {
+  const S = OF.S; if (!S || !S.info) return null;
+  if (S._mtf && Date.now() - S._mtf.at < 1000) return S._mtf;
+  const now = OF.now(), rows = [], W = { '1m': 0.5, '5m': 0.8, '15m': 1, '1h': 1.2, '4h': 1.2, '12h': 1 };
+  let sum = 0, sw = 0, up = 0, dn = 0;
+  for (const tf of OF.MTF) {
+    const k = S.k[tf];
+    if (!k || k.length < 55) { rows.push({ tf, score: null }); continue; }
+    const i = k.length - 1, c = k[i], p = k[i - 1], ms = OF.tfMs[tf], done = OF.clamp((now - c.t) / ms, 0, 1);
+    const dc = c.qv ? (2 * c.bqv - c.qv) / c.qv : 0, dp = p.qv ? (2 * p.bqv - p.qv) / p.qv : 0;
+    const delta = OF.clamp((dc * (0.3 + 0.7 * done) + dp * (0.7 - 0.7 * done)) * 3, -1, 1);
+    const e21 = OF.ema(k, 21), e50 = OF.ema(k, 50), a = OF.atr(k) || c.c * 0.001;
+    const trend = OF.clamp(0.5 * Math.sign(e21[i] - e50[i]) + 0.5 * (c.c - e21[i]) / a, -1, 1);
+    const mom = OF.clamp((c.c - k[Math.max(0, i - 3)].c) / (a * 1.5), -1, 1);
+    let flow = null;
+    if (ms <= 9e5) { const f = OF.flow(now - ms); flow = f.tot ? OF.clamp(f.d / f.tot * 2, -1, 1) : 0; }
+    const sc = flow == null ? 0.4 * trend + 0.35 * delta + 0.25 * mom : 0.3 * trend + 0.25 * delta + 0.2 * mom + 0.25 * flow;
+    const score = Math.round(sc * 100);
+    rows.push({ tf, score, trend, delta, mom, flow, ema21: e21[i] });
+    sum += sc * W[tf]; sw += W[tf]; if (score > 15) up++; else if (score < -15) dn++;
+  }
+  S._mtf = { at: Date.now(), rows, overall: sw ? Math.round(sum / sw * 100) : null, up, dn };
+  return S._mtf;
+};
+
 /* ---------- sentiment meters ---------- */
 const lab = s => { const a = Math.abs(s); const d = s > 0 ? 'bullish' : 'bearish'; return a < 15 ? 'Neutral' : a < 55 ? d[0].toUpperCase() + d.slice(1) : 'Strongly ' + d; };
 OF.label = lab;

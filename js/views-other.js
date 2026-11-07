@@ -12,7 +12,7 @@ OF.views.profile = {
     tb.append(ui.seg('Range', [['1h', 'Last 1h'], ['4h', 'Last 4h'], ['day', 'Today (UTC)'], ['prev', 'Yesterday'], ['2d', 'Yesterday + today']], o.range, v => { o.range = v; save(); }),
       ui.toggle('Buy / sell split', o.split, v => { o.split = v; save(); }));
   },
-  mount(v) { this.c = ui.canvas(v); },
+  mount(v) { this.c = ui.canvas(v); ui.track(this); },
   prof() {
     const S = OF.S, ss = OF.session(); if (!ss) return null;
     const now = OF.now(), t = ss.todayCandles, p = S.day.prev;
@@ -49,6 +49,8 @@ OF.views.profile = {
     ui.hline(ctx, 0, pw, Y(p.val), C.blue, [4, 3], 'VAL ' + OF.fp(p.val), pw * 0.82);
     const ss = OF.session(); if (ss && ss.vwap && ss.vwap > lo && ss.vwap < hi) ui.hline(ctx, 0, pw, Y(ss.vwap), C.purple, [6, 3], 'VWAP ' + OF.fp(ss.vwap), pw * 0.62);
     if (S.last) { ui.hline(ctx, 0, pw, Y(S.last), '#e5e7eb', [2, 2]); ui.tag(ctx, pw + 1, Y(S.last), OF.fp(S.last), '#e5e7eb', '#000'); }
+    const cp = ui.cross(ctx, this.mouse, 0, pw, 10, H - 20, lo, hi, pw + 1);
+    if (cp != null) { const r = p.rows.find(x => cp >= x.p && cp < x.p + p.bin); ui.tip(this.mouse.cx, this.mouse.cy, r ? `<b>${OF.fp(r.p)}</b><br>volume ${OF.fmtUsd(r.v)}<br><span class="g">bought ${OF.fmtUsd(r.b)}</span> · <span class="r">sold ${OF.fmtUsd(r.s)}</span>` : ''); } else ui.tip();
   }
 };
 
@@ -65,7 +67,7 @@ OF.views.tpo = {
       ui.seg('Rows', [[0.5, '×0.5'], [1, '×1'], [2, '×2'], [4, '×4']], o.mult, v => { o.mult = v; save(); }),
       ui.seg('IB', [[1, '1 period'], [2, '2 periods']], o.ib, v => { o.ib = v; save(); }, 'Initial balance: the range of the first periods of the day.'));
   },
-  mount(v) { this.c = ui.canvas(v); },
+  mount(v) { this.c = ui.canvas(v); ui.track(this); },
   build() {
     const S = OF.S, o = this.o, k = S.k[o.period]; if (!k) { OF.loadKlines(o.period); return null; }
     const dayMs = 864e5, start = (Math.floor(OF.now() / dayMs) - o.days + 1) * dayMs, cs = k.filter(c => c.t >= start);
@@ -124,6 +126,7 @@ OF.views.tpo = {
       ctx.fillStyle = '#e5e7eb'; ctx.font = '10px sans-serif'; ctx.textBaseline = 'middle'; ctx.fillText('›', x0 - 12, Y(D.o)); ctx.fillText('‹', x0 - 12, Y(D.c));
     });
     if (S.last) { ui.hline(ctx, 0, pw, Y(S.last), '#e5e7eb', [3, 3]); ui.tag(ctx, pw + 1, Y(S.last), OF.fp(S.last), '#e5e7eb', '#000'); }
+    ui.cross(ctx, this.mouse, 0, pw, top, ph, lo, hi, pw + 1);
     ctx.fillStyle = C.muted; ctx.font = '10px sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'bottom';
     ctx.fillText('Letters = periods (A first) · orange = value area · blue = POC · purple bar = initial balance · amber = single prints · › open ‹ close', 6, H - 4);
   }
@@ -160,7 +163,7 @@ OF.views.gamma = {
     if (!this.c) {
       v.innerHTML = '';
       this.cards = el('div', 'cards'); v.appendChild(this.cards);
-      const box = el('div', 'gbox'); v.appendChild(box); this.c = ui.canvas(box);
+      const box = el('div', 'gbox'); v.appendChild(box); this.c = ui.canvas(box); ui.track(this);
     }
     const pct = x => ((x / g.spot - 1) * 100).toFixed(2) + '%', neg = g.net < 0;
     this.cards.innerHTML = `
@@ -199,6 +202,7 @@ OF.views.gamma = {
     ctx.beginPath(); g.curve.forEach((p, i) => { if (p.px < lo || p.px > hi) return; const x = mxX + p.v / cm * (CV / 2 - 10), y = Y(p.px); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }); ctx.strokeStyle = '#e5e7eb'; ctx.stroke();
     ctx.strokeStyle = C.faint; ctx.beginPath(); ctx.moveTo(mxX, 10); ctx.lineTo(mxX, H - 10); ctx.stroke();
     ctx.fillStyle = C.muted; ctx.textAlign = 'center'; ctx.fillText('net gamma if price were here', x0 + (CV - 8) / 2, 18);
+    ui.cross(ctx, this.mouse, 0, pw + CV, 10, H - 20, lo, hi, pw + CV + 1);
   }
 };
 
@@ -273,7 +277,7 @@ OF.views.liquidity = {
 OF.views.futures = {
   label: 'Futures', title: 'Perpetual futures — funding, open interest, basis, liquidations',
   toolbar(tb) { tb.append(el('span', 'lbl', 'Bybit USDT perpetual (live) · liquidation map estimated from Binance futures open interest')); },
-  mount(v) { v.classList.add('scroll'); v.innerHTML = '<div class="cards" id="fuCards"></div><div class="fuwrap"><div class="gbox" id="fuMap"></div><div class="fuside"><div class="sh">Latest liquidations</div><div id="fuLiq"></div></div></div>'; this.c = ui.canvas(document.getElementById('fuMap')); },
+  mount(v) { v.classList.add('scroll'); v.innerHTML = '<div class="cards" id="fuCards"></div><div class="fuwrap"><div class="gbox" id="fuMap"></div><div class="fuside"><div class="sh">Latest liquidations</div><div id="fuLiq"></div></div></div>'; this.c = ui.canvas(document.getElementById('fuMap')); ui.track(this); },
   render() {
     const S = OF.S; if (!S) return; const F = S.fut, now = OF.now();
     if (F.available === false) { document.getElementById('fuCards').innerHTML = '<div class="empty">No USDT perpetual for this coin on Bybit.</div>'; }
@@ -298,6 +302,7 @@ OF.views.futures = {
     for (const r of rows) { const v = r.p > m.mid ? r.short : r.long; if (!v) continue; ctx.fillStyle = r.p > m.mid ? 'rgba(34,197,94,.75)' : 'rgba(239,68,68,.75)'; ctx.fillRect(0, Y(r.p + m.bin), v / mx * (pw - 110), rh); if (v > mx * 0.4) { ctx.fillStyle = '#e5e7eb'; ctx.font = '10px ui-monospace,monospace'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle'; ctx.fillText(OF.fmtUsd(v) + ' · ' + ((r.p / m.mid - 1) * 100).toFixed(1) + '%', v / mx * (pw - 110) + 4, Y(r.p + m.bin / 2)); } }
     ui.hline(ctx, 0, pw, Y(m.mid), '#e5e7eb', [], 'price ' + OF.fp(m.mid));
     ctx.fillStyle = C.muted; ctx.font = '10px sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'top'; ctx.fillText('Estimated liquidations by price — longs below (forced selling), shorts above (forced buying). Model: new OI × 10/25/50/100× leverage mix.', 6, 2);
+    ui.cross(ctx, this.mouse, 0, pw, 16, H - 26, lo, hi, pw + 1);
   }
 };
 

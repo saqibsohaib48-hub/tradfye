@@ -74,10 +74,43 @@ OF.ui.tag = (ctx, x, y, text, bg, fg) => {
   ctx.font = '11px ui-monospace,Menlo,Consolas,monospace'; const w = ctx.measureText(text).width + 8;
   ctx.fillStyle = bg; ctx.fillRect(x, y - 8, w, 16); ctx.fillStyle = fg || '#000'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle'; ctx.fillText(text, x + 4, y);
 };
+/* labels placed this frame — used to push overlapping labels apart */
+OF._lbls = [];
+OF.ui.lblReset = () => { OF._lbls = []; };
 OF.ui.hline = (ctx, x0, x1, y, color, dash, label, lx) => {
   ctx.save(); ctx.strokeStyle = color; ctx.setLineDash(dash || [4, 4]); ctx.lineWidth = 1;
   ctx.beginPath(); ctx.moveTo(x0, Math.round(y) + .5); ctx.lineTo(x1, Math.round(y) + .5); ctx.stroke(); ctx.restore();
-  if (label) { ctx.font = '11px ui-monospace,Menlo,Consolas,monospace'; ctx.fillStyle = color; ctx.textAlign = 'left'; ctx.textBaseline = 'bottom'; ctx.fillText(label, (lx != null ? lx : x0) + 4, y - 2); }
+  if (label) {
+    ctx.font = '11px ui-monospace,Menlo,Consolas,monospace';
+    const x = (lx != null ? lx : x0) + 4, w = ctx.measureText(label).width + 6;
+    let ly = y - 2;
+    for (let i = 0; i < 12; i++) {
+      const hit = OF._lbls.find(r => Math.abs(r.y - ly) < 12 && r.x < x + w && x < r.x + r.w);
+      if (!hit) break; ly = hit.y + (ly >= hit.y ? 12 : -12);
+    }
+    OF._lbls.push({ x, y: ly, w });
+    ctx.fillStyle = 'rgba(10,13,18,.75)'; ctx.fillRect(x - 2, ly - 11, w, 12);
+    ctx.fillStyle = color; ctx.textAlign = 'left'; ctx.textBaseline = 'bottom'; ctx.fillText(label, x, ly);
+  }
+};
+/* mouse tracking + crosshair with a price tag on the axis (works over the price scale too) */
+OF.ui.track = view => {
+  const cv = view.c.cv;
+  cv.addEventListener('mousemove', e => { const r = cv.getBoundingClientRect(); view.mouse = { x: e.clientX - r.left, y: e.clientY - r.top, cx: e.clientX, cy: e.clientY }; });
+  cv.addEventListener('mouseleave', () => { view.mouse = null; OF.ui.tip(); });
+};
+OF.ui.cross = (ctx, m, x0, x1, top, h, lo, hi, axisX, timeAt) => {
+  if (!m || m.y < top || m.y > top + h) return null;
+  const p = lo + (top + h - m.y) / h * (hi - lo);
+  ctx.save(); ctx.strokeStyle = 'rgba(255,255,255,.35)'; ctx.setLineDash([3, 3]);
+  ctx.beginPath(); ctx.moveTo(x0, Math.round(m.y) + .5); ctx.lineTo(x1, Math.round(m.y) + .5);
+  if (m.x < x1) { ctx.moveTo(Math.round(m.x) + .5, top); ctx.lineTo(Math.round(m.x) + .5, top + h); }
+  ctx.stroke(); ctx.restore();
+  OF.ui.tag(ctx, axisX, m.y, OF.fp(p), '#2563eb', '#fff');
+  const S = OF.S;
+  if (S && S.last) { const d = (p / S.last - 1) * 100; ctx.font = '10px ui-monospace,monospace'; ctx.fillStyle = '#93c5fd'; ctx.textAlign = 'right'; ctx.textBaseline = 'bottom'; ctx.fillText((d >= 0 ? '+' : '') + d.toFixed(2) + '% from price', x1 - 4, m.y - 3); }
+  if (timeAt && m.x < x1) { const t = timeAt(m.x); if (t) OF.ui.tag(ctx, OF.clamp(m.x - 30, 0, x1 - 70), top + h + 9, OF.hm(t), '#2563eb', '#fff'); }
+  return p;
 };
 OF.ui.msg = (ctx, w, h, text) => { ctx.fillStyle = C.muted; ctx.font = '13px system-ui,sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(text, w / 2, h / 2); };
 

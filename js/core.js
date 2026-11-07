@@ -41,7 +41,7 @@ OF.pctile = (arr, q) => {
   const s = Float64Array.from(arr).sort();
   return s[Math.min(s.length - 1, Math.floor(q * s.length))];
 };
-OF.tfMs = { '1m': 6e4, '5m': 3e5, '15m': 9e5, '30m': 18e5, '1h': 36e5, '4h': 144e5, '1d': 864e5 };
+OF.tfMs = { '1m': 6e4, '5m': 3e5, '15m': 9e5, '30m': 18e5, '1h': 36e5, '4h': 144e5, '12h': 432e5, '1d': 864e5 };
 OF.hm = (t, sec) => {
   const d = new Date(t), p = n => String(n).padStart(2, '0');
   return p(d.getHours()) + ':' + p(d.getMinutes()) + (sec ? ':' + p(d.getSeconds()) : '');
