@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FlowDesk — order-flow terminal</title>
+<meta name="description" content="Live crypto order-flow terminal: liquidity heatmap, footprint, whales, profiles, gamma, futures and sentiment from public exchange data.">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="app">
+  <div class="brandbar">
+    <span class="brand"><span class="logo">F</span>FlowDesk</span>
+    <span class="tag">LIVE · public data</span>
+    <span class="muted sm hide-sm">Binance spot · Bybit perps · Deribit options · Coinbase — not financial advice</span>
+  </div>
+
+  <header class="top">
+    <div class="sym">
+      <button id="symBtn" class="symbtn">BTC/USDT ▾</button>
+      <div id="symMenu" class="menu hidden">
+        <input id="symSearch" placeholder="Search USDT pairs…" autocomplete="off">
+        <div id="symList"></div>
+      </div>
+    </div>
+    <div class="quotes mono">
+      <span id="qLast" class="last">--</span>
+      <span class="g">bid <span id="qBid">--</span></span>
+      <span class="r">ask <span id="qAsk">--</span></span>
+      <span class="muted">spread <span id="qSpread">--</span></span>
+      <span id="qAgo" class="y sm"></span>
+    </div>
+    <div class="hright">
+      <div id="tfSeg"></div>
+      <div id="linesSeg"></div>
+      <span id="status" class="badge">LOADING</span>
+      <span id="lag" class="lag mono"></span>
+    </div>
+  </header>
+
+  <nav class="tabsbar">
+    <div id="tabs" class="tabs" role="tablist"></div>
+    <div class="stats mono">
+      <span id="stCandle"></span><span id="stCvd"></span><span id="stPoc"></span>
+      <button id="panelBtn" class="iconbtn" title="Show / hide the Decision panel and DOM (P)">⟨⟩</button>
+    </div>
+  </nav>
+
+  <div class="work">
+    <main class="main">
+      <div id="toolbar" class="toolbar"></div>
+      <div id="reading" class="reading"></div>
+      <div id="view" class="view"></div>
+    </main>
+    <aside class="panel">
+      <div class="phead">Decision</div>
+      <div id="decision"></div>
+      <div class="phead">DOM · ladder <span class="help" title="Order book around the price. bid $ / ask $ = resting size, traded = volume printed there in the last minute, Δ 1m = change in resting size over the last minute. Size that keeps getting traded into without disappearing is real; size that vanishes as price approaches is often for show.">?</span></div>
+      <div id="dom"></div>
+    </aside>
+    <button id="vtab" class="vtab wait" title="Decision panel (P)">WAIT</button>
+  </div>
+</div>
+<div id="tip" class="tip hidden"></div>
+
+<script src="js/core.js"></script>
+<script src="js/metrics.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/views-charts.js"></script>
+<script src="js/views-other.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
