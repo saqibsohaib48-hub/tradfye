@@ -72,7 +72,8 @@ function newState(symbol) {
     events: [], placed: new Map(), tradedAt: new Map(), refill: new Map(), pullCount: new Map(), l3Min: 20000,
     k: {}, kLoading: {}, day: null,
     fut: { available: null, oiHist: [] }, futFlow: [], liqs: [], cb: null,
-    gamma: null, whaleThr: 0
+    gamma: null, whaleThr: 0,
+    volAt: new Map(), cqc: new Map()   // traded volume per exact price {b,s}; quote-change count per price
   };
 }
 
@@ -182,6 +183,7 @@ function upd(S, book, arr, side, t) {
   for (let i = 0; i < arr.length; i++) {
     const p = +arr[i][0], q = +arr[i][1], old = book.get(p) || 0;
     if (q === 0) book.delete(p); else book.set(p, q);
+    S.cqc.set(p, (S.cqc.get(p) || 0) + 1);
     if (!mid || Math.abs(p - mid) / mid > 0.01) continue;
     const dn = (q - old) * p, key = side + p;
     const tr = S.tradedAt.get(p), recentlyTraded = tr && t - tr < 1500;
@@ -236,6 +238,7 @@ function onTrade(S, d) {
   if (S.trades.length > 400000) S.trades.splice(0, 100000);
   S.cvd += buy ? n : -n;
   S.tradedAt.set(p, t);
+  addVol(S, tr);
   addBubble(S, tr);
   for (const tf in S.k) {
     const arr = S.k[tf]; if (!arr || !arr.length) continue;
@@ -248,6 +251,7 @@ function onTrade(S, d) {
   }
   if (OF.onTradeHook) OF.onTradeHook(tr);
 }
+function addVol(S, tr) { const v = S.volAt.get(tr.p) || { b: 0, s: 0 }; if (tr.buy) v.b += tr.n; else v.s += tr.n; S.volAt.set(tr.p, v); }
 function addBubble(S, tr) {
   const bt = Math.floor(tr.t / 500) * 500;
   let b = S.curBub;
@@ -278,6 +282,7 @@ function snapshotCol(S) {
 function housekeeping(S) {
   const now = OF.now();
   if (S.tradedAt.size > 30000) for (const [p, t] of S.tradedAt) if (now - t > 60000) S.tradedAt.delete(p);
+  if (S.cqc.size > 60000) { const mid = OF.mid(); for (const p of S.cqc.keys()) if (Math.abs(p - mid) / mid > 0.03) S.cqc.delete(p); }
   if (S.placed.size > 30000) for (const [k, v] of S.placed) if (now - v.t > 1800000) S.placed.delete(k);
   // adaptive L3 size floor: 95th pct of level notionals within ±0.5 %
   const mid = OF.mid(); if (mid) {
@@ -351,6 +356,7 @@ async function loadHistTrades(g, minutes) {
     S.histFrom = out[0].t;
     let c = 0; for (const t of out) c += t.buy ? t.n : -t.n; S.cvd += c;
     S.bubbles = []; S.curBub = null; for (const t of S.trades) addBubble(S, t);
+    for (const t of out) addVol(S, t);
     OF.emit('hist');
   } catch (e) { /* history is optional */ }
 }

@@ -206,64 +206,66 @@ OF.long1m = function () {
   return old.length ? old.filter(c => c.t < k[0].t).concat(k.slice(0, -1)) : k.slice(0, -1);
 };
 
-/* ===================== SCALP PLAN (1m–5m) =====================
+/* ===================== SCALP PLAN (15m) =====================
    Same idea as the intraday plan but on fast data: 1m/5m/15m direction, live flow, CVD, book imbalance,
-   nearby book walls (only walls that have stood ≥ 60 s and were not repeatedly pulled), 5m ATR for stops.
+   nearby book walls (only walls that have stood ≥ 2 min and were not repeatedly pulled), 15m ATR for stops; 1h/4h as context.
    A scalp is CONFIRMED only when 7 of 9 checks pass, including the three key ones. */
 OF.scalpPlan = function () {
   const S = OF.S; if (!S || !S.info) return { wait: 'Loading…' };
-  const k1 = S.k['1m'], k5 = S.k['5m'];
-  if (!k1 || k1.length < 60 || !k5 || k5.length < 60) { OF.loadKlines('1m'); OF.loadKlines('5m'); return { wait: 'Loading 1m and 5m candles…' }; }
+  const k1 = S.k['15m'], k5 = S.k['1h'];
+  if (!k1 || k1.length < 60 || !k5 || k5.length < 60) { OF.loadKlines('15m'); OF.loadKlines('1h'); return { wait: 'Loading 15m and 1h candles…' }; }
   if (!S.synced) return { wait: 'Waiting for the live order book…' };
-  const px = S.last || k1[k1.length - 1].c, atr = OF.atr(k5), atr1 = OF.atr(k1);
+  const px = S.last || k1[k1.length - 1].c, atr = OF.atr(k1), atr1 = atr;
   const met = OF.meters(), M = {}; if (met) for (const m of met.list) M[m.key] = m;
   const mt = OF.mtf(), T = {}; if (mt) for (const r of mt.rows) T[r.tf] = r.score;
   const ss = OF.session(), now = OF.now();
   const F = [], fac = (name, w, s, text, group) => F.push({ name, w, s: s == null ? null : clamp1(s), text, group });
-  [['1m', 1], ['5m', 1.5], ['15m', 1.5], ['1h', 0.7]].forEach(([tf, w]) => { if (T[tf] != null) fac(tf + ' direction', w, T[tf] / 100, 'score ' + T[tf], 'Timeframes'); });
+  [['5m', 0.7], ['15m', 1.5], ['1h', 1.5], ['4h', 0.8]].forEach(([tf, w]) => { if (T[tf] != null) fac(tf + ' direction', w, T[tf] / 100, 'score ' + T[tf], 'Timeframes'); });
   const mm = (key, w, group) => { const m = M[key]; if (m && m.score != null) fac(m.name, w, m.score / 100, m.text, group); };
-  mm('momentum', 1, 'Flow now'); mm('aggr', 1.5, 'Flow now'); mm('cvd5', 1.2, 'Flow now'); mm('large', 0.8, 'Flow now'); mm('absorb', 0.6, 'Flow now');
+  mm('d15m', 1.2, 'Flow now'); mm('momentum', 0.4, 'Flow now'); mm('aggr', 0.8, 'Flow now'); mm('cvd5', 1.2, 'Flow now'); mm('large', 0.8, 'Flow now'); mm('absorb', 0.6, 'Flow now');
   mm('imb', 1, 'Order book'); mm('walls', 0.6, 'Order book'); mm('fake', 0.6, 'Order book'); mm('faggr', 0.8, 'Futures');
   let sw = 0, sum = 0; for (const f of F) if (f.s != null) { sum += f.s * f.w; sw += f.w; }
   const bias = sw ? sum / sw : 0, voting = F.filter(f => f.s != null && Math.abs(f.s) > 0.15);
   const agree = voting.length ? voting.filter(f => Math.sign(f.s) === Math.sign(bias)).length / voting.length : 0;
 
   // levels close to price
-  const lv = [], add = (p, w, src) => { if (p && isFinite(p) && Math.abs(p / px - 1) < 0.012) lv.push({ p, w, src }); };
-  const bb = OF.bookBins(0.8, OF.niceStep(px * 0.0002)), walls = [];
+  const lv = [], add = (p, w, src) => { if (p && isFinite(p) && Math.abs(p / px - 1) < 0.025) lv.push({ p, w, src }); };
+  const bb = OF.bookBins(1.5, OF.niceStep(px * 0.0004)), walls = [];
   for (const [p, n] of bb.b) walls.push({ p: p + bb.bin / 2, n, side: 'bid' }); for (const [p, n] of bb.a) walls.push({ p: p + bb.bin / 2, n, side: 'ask' });
   walls.sort((a, b) => b.n - a.n); const wmx = walls.length ? walls[0].n : 1;
   walls.slice(0, 12).forEach(w => add(w.p, 0.8 + 2 * w.n / wmx, (w.side === 'bid' ? 'bid wall ' : 'ask wall ') + OF.fmtUsd(w.n)));
-  const p1 = pivots(k1, 3, 180), p5 = pivots(k5, 3, 120);
-  p1.hi.slice(-6).forEach(x => add(x.p, 1, '1m swing high')); p1.lo.slice(-6).forEach(x => add(x.p, 1, '1m swing low'));
-  p5.hi.slice(-6).forEach(x => add(x.p, 1.5, '5m swing high')); p5.lo.slice(-6).forEach(x => add(x.p, 1.5, '5m swing low'));
+  const p1 = pivots(k1, 3, 160), p5 = pivots(k5, 2, 120);
+  p1.hi.slice(-6).forEach(x => add(x.p, 1.3, '15m swing high')); p1.lo.slice(-6).forEach(x => add(x.p, 1.3, '15m swing low'));
+  p5.hi.slice(-6).forEach(x => add(x.p, 2, '1h swing high')); p5.lo.slice(-6).forEach(x => add(x.p, 2, '1h swing low'));
+  if (ss && ss.prev) { add(ss.prev.poc, 1, 'prev-day POC'); add(ss.prev.vah, 0.8, 'prev-day VAH'); add(ss.prev.val, 0.8, 'prev-day VAL'); }
   if (ss) { if (ss.vwap) add(ss.vwap, 1.2, 'VWAP'); if (ss.today) { add(ss.today.poc, 1.3, 'today POC'); add(ss.today.vah, 1, 'today VAH'); add(ss.today.val, 1, 'today VAL'); } }
   const lm = OF.liqMap(); if (lm) lm.rows.forEach(r => add(r.p + lm.bin / 2, 0.8, 'liq cluster ' + OF.fmtUsd(r.long + r.short)));
-  const rs = OF.niceStep(px * 0.002); for (let j = -2; j <= 2; j++) add((Math.round(px / rs) + j) * rs, 0.4, 'round number');
+  const rs = OF.niceStep(px * 0.005); for (let j = -2; j <= 2; j++) add((Math.round(px / rs) + j) * rs, 0.4, 'round number');
   const { zones, sup, res } = makeZones(lv, px, atr, 0.3);
-  const cfg = { near: 1.0, buf: 0.2, minR: 0.4, maxR: 1.5, tp1R: 1.2, tp1Cap: 3, tp2R: 2, tp2Cap: 4, step: 0.2 };
+  const cfg = { near: 1.2, buf: 0.2, minR: 0.5, maxR: 1.5, tp1R: 1.3, tp1Cap: 3.5, tp2R: 2.2, tp2Cap: 5, step: 0.25 };
   const long = buildPlan(1, px, atr, sup, res, cfg), short = buildPlan(-1, px, atr, sup, res, cfg);
   const dir = bias >= 0 ? 1 : -1, pl = dir > 0 ? long : short;
 
   // confirmation checklist
   const sc = k => (M[k] && M[k].score != null ? M[k].score : 0) * dir;
+  const fl = OF.flow(now - 9e5), f15 = fl.tot ? fl.d / fl.tot : 0;
   const wl = OF.walls(0.3), prot = wl && wl[dir > 0 ? 'bid' : 'ask'];
   const CH = [
-    ['5m and 15m agree', T['5m'] != null && T['5m'] * dir > 15 && (T['15m'] || 0) * dir > -15, `5m ${T['5m']} · 15m ${T['15m']}`, true],
-    ['1h is not strongly against', (T['1h'] || 0) * dir > -55, '1h ' + T['1h'], false],
-    [(dir > 0 ? 'Buyers' : 'Sellers') + ' in control (1 min)', sc('aggr') > 20, M.aggr ? M.aggr.text : '', true],
+    ['15m and 1h agree', T['15m'] != null && T['15m'] * dir > 15 && (T['1h'] || 0) * dir > -15, `15m ${T['15m']} · 1h ${T['1h']}`, true],
+    ['4h is not strongly against', (T['4h'] || 0) * dir > -55, '4h ' + T['4h'], false],
+    [(dir > 0 ? 'Buyers' : 'Sellers') + ' in control (15 min)', f15 * dir > 0.1, `${Math.round(Math.abs(f15) * 100)}% net ${f15 >= 0 ? 'buying' : 'selling'} over 15 min`, true],
     ['CVD 5 min confirms', sc('cvd5') > 10, M.cvd5 ? M.cvd5.text : '', false],
     ['Book leans our way (±0.1%)', sc('imb') > 0, M.imb ? M.imb.text : '', false],
-    ['Real wall protects the stop', !!(prot && prot.standSec >= 60 && prot.pulls < 3 && Math.abs(prot.p - pl.entry) < atr * 1.2), prot ? `${prot.side || (dir > 0 ? 'bid' : 'ask')} wall ${OF.fmtUsd(prot.n)} at ${OF.fp(prot.p)}, standing ${Math.round(prot.standSec)}s, pulled ${prot.pulls}× nearby` : 'no wall', true],
+    ['Real wall protects the stop', !!(prot && prot.standSec >= 120 && prot.pulls < 3 && Math.abs(prot.p - pl.entry) < atr * 1.2), prot ? `${prot.side || (dir > 0 ? 'bid' : 'ask')} wall ${OF.fmtUsd(prot.n)} at ${OF.fp(prot.p)}, standing ${Math.round(prot.standSec)}s, pulled ${prot.pulls}× nearby` : 'no wall', true],
     ['Room to TP1 (no strong zone in the way)', !pl.blocker, pl.blocker ? 'zone at ' + OF.fp(pl.blocker.p) : 'clear', false],
     ['Market not dangerous', !met || met.danger < 66, met ? 'danger ' + Math.round(met.danger) : '', false],
-    ['10-second momentum not against', sc('momentum') > -40, M.momentum ? M.momentum.text : '', false]
+    ['15m candle delta not against', sc('d15m') > -20, M.d15m ? M.d15m.text : '', false]
   ].map(([name, ok, text, key]) => ({ name, ok, text, key }));
   const passed = CH.filter(c => c.ok).length, keyOk = CH.filter(c => c.key).every(c => c.ok);
   const confirmed = passed >= 7 && keyOk && Math.abs(bias) >= 0.15 && pl.rr1 >= 1;
   const why = confirmed ? [] : [`${passed}/9 checks pass` + (keyOk ? '' : ' and a key check fails'), ...CH.filter(c => !c.ok).map(c => c.name.toLowerCase())];
-  const hist = OF.long1m();
-  const prob = backtest(hist, dir, pl.risk / atr1, pl.rr1, pl.rr2, 60, 'last ' + (hist ? Math.round(hist.length / 60) : 0) + ' h of 1m candles');
+  const hist = k1.slice(0, -1);
+  const prob = backtest(hist, dir, pl.risk / atr1, pl.rr1, pl.rr2, 16, 'last ' + Math.round(hist.length / 96) + ' days of 15m candles');
   const conf = Math.round(OF.clamp(passed / 9 * 60 + Math.abs(bias) * 40, 0, 95));
   return { at: Date.now(), scalp: true, px, atr, bias, agree, factors: F, zones, sup, res, long, short, plan: confirmed ? pl : null, idea: pl, side: confirmed ? dir : 0,
     checks: CH, passed, why, conf, prob, verdict: confirmed ? (dir > 0 ? 'LONG SCALP' : 'SHORT SCALP') : 'NO SCALP' };
@@ -296,17 +298,17 @@ function step(L, price, t) {
 }
 OF.views.plan = {
   label: 'Trade plan', title: 'Everything combined into one 1h intraday setup — entry, stop, targets, and live status',
-  o: Object.assign({ acct: 1000, risk: 1, full: false, ctf: '1h', ctfS: '5m', mode: 'intraday' }, LS.get('plan', {})),
+  o: Object.assign({ acct: 1000, risk: 1, full: false, ctf: '1h', ctfS: '15m', mode: 'intraday' }, LS.get('plan', {})),
   zv: { n: 72, off: 0 },
   save() { LS.set('plan', this.o); },
   toolbar(tb) {
     const o = this.o;
     const inp = (lab, key, step) => { const w = el('div', 'grp'); w.appendChild(el('span', 'lbl', lab)); const i = el('input', 'num'); i.type = 'number'; i.step = step; i.value = o[key]; i.oninput = () => { o[key] = +i.value || 0; this.save(); this.html(); }; w.appendChild(i); return w; };
-    tb.append(ui.seg('Mode', [['intraday', 'Intraday 1h'], ['scalp', '⚡ Scalp 1–5m']], o.mode, v => { o.mode = v; this.save(); OF.app.remount(); }));
+    tb.append(ui.seg('Mode', [['intraday', 'Intraday 1h'], ['scalp', '⚡ Scalp 15m']], o.mode, v => { o.mode = v; this.save(); OF.app.remount(); }));
     tb.append(inp('Account $', 'acct', 100), inp('Risk %', 'risk', 0.25));
     const nb = el('button', 'tgl on', '✚ New plan'); nb.title = 'Discard the current plan and build a fresh one from the latest data'; nb.onclick = () => { this.unlock(); this.p = this.gen(); this.maybeLock(); this.html(); };
     tb.append(nb);
-    if (o.mode === 'scalp') tb.append(ui.seg('Chart', [['1m', '1m'], ['5m', '5m'], ['15m', '15m']], o.ctfS, v => { o.ctfS = v; this.save(); this.zv = { n: 90, off: 0 }; }));
+    if (o.mode === 'scalp') tb.append(ui.seg('Chart', [['5m', '5m'], ['15m', '15m'], ['1h', '1h']], o.ctfS, v => { o.ctfS = v; this.save(); this.zv = { n: 90, off: 0 }; }));
     else tb.append(ui.seg('Chart', [['15m', '15m'], ['1h', '1h'], ['4h', '4h']], o.ctf, v => { o.ctf = v; this.save(); this.zv = { n: 72, off: 0 }; }));
     tb.append(ui.toggle('⛶ Full chart', o.full, v => { o.full = v; this.save(); this.applyFull(); }, 'Give the chart the whole page (status banner stays). Scroll = zoom, drag = pan, double-click = reset.'));
     tb.append(el('span', 'lbl', 'Rule-based setup — a decision aid, not financial advice.'));
@@ -318,7 +320,7 @@ OF.views.plan = {
   maybeLock() {
     const p = this.p; if (!p || p.wait || !p.plan) return;
     if (this.L && !FINAL[this.L.state]) return;
-    this.L = this.isScalp() ? lockPlan(p, OF.S.symbol, 20 * 6e4, '20 min') : lockPlan(p, OF.S.symbol, 4 * 36e5, '4 h'); LS.set(this.key(), this.L);
+    this.L = this.isScalp() ? lockPlan(p, OF.S.symbol, 60 * 6e4, '1 h') : lockPlan(p, OF.S.symbol, 4 * 36e5, '4 h'); LS.set(this.key(), this.L);
   },
   applyFull() { if (this.root) this.root.classList.toggle('plfull', !!this.o.full); this.c && this.c.fit(); },
   mount(v) {
@@ -345,7 +347,7 @@ OF.views.plan = {
   },
   reading() {
     const p = this.p; if (!p || p.wait) return 'Collecting data for the plan…';
-    if (p.scalp) return `Scalp engine: bias <b class="${p.bias > 0 ? 'g' : 'r'}">${p.bias > 0 ? 'bullish' : 'bearish'} ${Math.abs(p.bias * 100).toFixed(0)}</b> · <b>${p.passed}/9</b> confirmation checks pass · 5m ATR ${OF.fp(p.atr)} · re-checked every 5 s; a confirmed scalp is locked and tracked (expires in 20 min if not filled).`;
+    if (p.scalp) return `Scalp engine: bias <b class="${p.bias > 0 ? 'g' : 'r'}">${p.bias > 0 ? 'bullish' : 'bearish'} ${Math.abs(p.bias * 100).toFixed(0)}</b> · <b>${p.passed}/9</b> confirmation checks pass · 15m ATR ${OF.fp(p.atr)} · re-checked every 5 s; a confirmed scalp is locked and tracked (cancelled if not filled within 1 h).`;
     return `Live analysis: bias <b class="${p.bias > 0 ? 'g' : 'r'}">${p.bias > 0 ? 'bullish' : 'bearish'} ${Math.abs(p.bias * 100).toFixed(0)}</b> · ${Math.round(p.agree * 100)}% of factors agree · 1h ATR ${OF.fp(p.atr)} · ${p.zones.length} price zones. Updates every 15 s; a locked plan keeps its levels.`;
   },
   status() {
@@ -395,7 +397,7 @@ OF.views.plan = {
     const lockedCard = L => {
       const qty = L.risk ? o.acct * o.risk / 100 / L.risk : 0, dirTxt = L.dir > 0 ? 'LONG' : 'SHORT';
       return `<div class="plcard ${L.dir > 0 ? 'long' : 'short'}">
-        <div class="plh"><b>${dirTxt} ${L.scalp ? 'scalp' : 'plan'} · locked ${OF.hm(L.created)}</b><span class="muted sm">${L.eType === 'limit' ? (L.dir > 0 ? 'buy' : 'sell') + ' limit order' : 'at market'} · ${L.scalp ? '1–5m scalp' : '1h intraday'} · confidence ${L.conf}%</span></div>
+        <div class="plh"><b>${dirTxt} ${L.scalp ? 'scalp' : 'plan'} · locked ${OF.hm(L.created)}</b><span class="muted sm">${L.eType === 'limit' ? (L.dir > 0 ? 'buy' : 'sell') + ' limit order' : 'at market'} · ${L.scalp ? '15m scalp' : '1h intraday'} · confidence ${L.conf}%</span></div>
         <div class="plrow"><span>Entry</span><b class="mono">${fmt(L.entry)}</b><span class="muted sm">${L.baseSrc.length ? 'at ' + L.baseSrc.join(', ') : ''}</span></div>
         <div class="plrow"><span class="r">Stop loss</span><b class="mono r">${fmt(L.stopNow)}</b><span class="muted sm">${L.stopNow === L.entry ? 'moved to entry after TP1' : 'risk ' + fmt(L.risk) + ' per ' + S.info.base}</span></div>
         <div class="plrow"><span class="g">Take profit 1</span><b class="mono g">${fmt(L.tp1)}</b><span class="muted sm">${L.rr1.toFixed(1)}R${L.tp1Src.length ? ' · ' + L.tp1Src.join(', ') : ''} — close half, stop to entry</span></div>

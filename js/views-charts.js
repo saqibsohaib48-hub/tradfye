@@ -3,10 +3,184 @@
 'use strict';
 const OF = window.OF, C = OF.C, el = OF.el, ui = OF.ui, LS = OF.LS;
 
+/* ===================== HEATMAP COLUMNS (right of the heatmap, aligned to its price rows) ===================== */
+const COLS = {
+  delta:    { label: 'Delta',        w: 66,  desc: 'Bought − sold at each price (recorded since the page opened): which side was more aggressive there' },
+  book:     { label: 'Book',         w: 128, desc: 'Live resting bid and ask size at each price, as coloured bars and $' },
+  tape:     { label: 'Tape',         w: 178, desc: 'Time & sales: newest trades on top, buyers green, sellers red (not price-aligned)' },
+  cob:      { label: 'COB',          w: 86,  desc: 'Current order book: resting size at each price as one bar — bids green below, asks red above' },
+  superdom: { label: 'SuperDOM',     w: 300, desc: 'Trading-terminal ladder: sold | bid | price | ask | bought' },
+  size:     { label: 'Size $',       w: 68,  desc: 'Resting size at each price, in dollars' },
+  cum:      { label: 'Cumulative $', w: 72,  desc: 'Resting size added up from the spread outward — how much must trade to reach that price' },
+  volume:   { label: 'Volume',       w: 80,  desc: 'Traded at each price (recorded): bought green, sold red' },
+  svp:      { label: 'SVP',          w: 74,  desc: 'Session volume profile: traded at each price since 00:00 UTC (from 1-minute candles)' },
+  cumd:     { label: 'Cumulative Δ', w: 74,  desc: 'Delta added up from the current price outward' },
+  cqc:      { label: 'CQC',          w: 56,  desc: 'Quote-change counter: how many times the resting size at that price changed — busy, flickering levels' }
+};
+const COL_IDS = Object.keys(COLS);
+const PRESETS = [['Book + tape', ['book', 'tape']], ['SuperDOM + tape', ['superdom', 'tape']], ['Depth ladder', ['book', 'size', 'cum']], ['Delta + tape', ['delta', 'tape']],
+  ['Order flow', ['delta', 'volume', 'cumd', 'tape']], ['COB + SVP + CQC', ['cob', 'svp', 'cqc']], ['Everything', COL_IDS.slice()]];
+const k$ = n => OF.fmtUsd(n).replace('$', '');
+
+function drawColumns(ctx, x0, top, ph, lo, hi, rb, Y, list, o, mouse) {
+  const S = OF.S, mid = OF.mid();
+  const rh0 = ph * rb / (hi - lo), cb = rb * Math.max(1, Math.ceil(15 / rh0)), ch = ph * cb / (hi - lo);
+  const r0 = Math.floor(lo / cb), r1 = Math.ceil(hi / cb), key = p => Math.floor(p / cb);
+  // data per row
+  const bid = new Map(), ask = new Map(), vb = new Map(), vs = new Map(), svp = new Map(), q = new Map();
+  for (const [p, s] of S.bids) if (p >= lo && p <= hi) { const k = key(p); bid.set(k, (bid.get(k) || 0) + p * s); }
+  for (const [p, s] of S.asks) if (p >= lo && p <= hi) { const k = key(p); ask.set(k, (ask.get(k) || 0) + p * s); }
+  for (const [p, v] of S.volAt) if (p >= lo && p <= hi) { const k = key(p); vb.set(k, (vb.get(k) || 0) + v.b); vs.set(k, (vs.get(k) || 0) + v.s); }
+  for (const [p, n] of S.cqc) if (p >= lo && p <= hi) { const k = key(p); q.set(k, (q.get(k) || 0) + n); }
+  const ss = OF.session(); if (ss && ss.today) for (const r of ss.today.rows) { const c = r.p + ss.today.bin / 2; if (c >= lo && c <= hi) { const k = key(c); svp.set(k, (svp.get(k) || 0) + r.v); } }
+  const mk = key(S.last || mid), bestBid = S.bb ? key(S.bb) : mk, bestAsk = S.ba ? key(S.ba) : mk;
+  const cumB = new Map(), cumA = new Map(); let acc = 0;
+  for (let k = bestBid; k >= r0; k--) { acc += bid.get(k) || 0; cumB.set(k, acc); } acc = 0;
+  for (let k = bestAsk; k <= r1; k++) { acc += ask.get(k) || 0; cumA.set(k, acc); }
+  const dl = k => (vb.get(k) || 0) - (vs.get(k) || 0), cumD = new Map(); acc = 0;
+  for (let k = mk; k <= r1; k++) { acc += dl(k); cumD.set(k, acc); } acc = 0;
+  for (let k = mk; k >= r0; k--) { acc += dl(k); if (k !== mk) cumD.set(k, acc); }
+  const max = m => { let x = 0; for (const v of m.values()) x = Math.max(x, Math.abs(v)); return x || 1; };
+  const mBook = Math.max(max(bid), max(ask)), mVol = Math.max(max(vb), max(vs)), mSvp = max(svp), mQ = max(q), mCum = Math.max(max(cumB), max(cumA)), mCD = max(cumD);
+  let mD = 0; for (let k = r0; k <= r1; k++) mD = Math.max(mD, Math.abs(dl(k))); mD = mD || 1;
+  const sum = m => { let s = 0; for (const v of m.values()) s += v; return s; };
+  const rowY = k => Y((k + 1) * cb), fs = ch >= 13 ? 10 : 0;
+  ctx.font = '10px ui-monospace,Menlo,monospace'; ctx.textBaseline = 'middle';
+  const bar = (x, w, y, frac, col, right) => { const bw = Math.max(1, Math.abs(frac) * (w - 4)); ctx.fillStyle = col; ctx.fillRect(right ? x + w - 2 - bw : x + 2, y + 1, bw, Math.max(1, ch - 2)); };
+  const txt = (x, w, y, t, col, align) => { if (!fs || !t) return; ctx.fillStyle = col || '#e5e7eb'; ctx.textAlign = align || 'right'; ctx.fillText(t, align === 'left' ? x + 4 : align === 'center' ? x + w / 2 : x + w - 4, y + ch / 2); };
+  let x = x0; const hdr = [], hit = [];
+  for (const c of list) {
+    const w = c.w;
+    ctx.fillStyle = '#0c1016'; ctx.fillRect(x, top, w, ph);
+    ctx.strokeStyle = C.grid; ctx.beginPath(); ctx.moveTo(x + .5, top - 30); ctx.lineTo(x + .5, top + ph); ctx.stroke();
+    // highlight current price row
+    ctx.fillStyle = 'rgba(255,255,255,.06)'; ctx.fillRect(x, rowY(mk), w, ch);
+    const sub = [];
+    if (c.id === 'tape') {
+      const tr = S.trades, ns = []; for (let i = Math.max(0, tr.length - 3000); i < tr.length; i++) ns.push(tr[i].n);
+      const min = Math.max(100, OF.pctile(ns, 0.7)), f1 = OF.flow(OF.now() - 60000), rowH = 15;
+      let y = top + 2, nrow = 0;
+      for (let i = tr.length - 1; i >= 0 && y + rowH <= top + ph; i--) {
+        const t = tr[i]; if (t.n < min) continue;
+        ctx.fillStyle = t.buy ? 'rgba(34,197,94,' + (0.08 + Math.min(0.4, t.n / (S.whaleThr || 1e6))) + ')' : 'rgba(239,68,68,' + (0.08 + Math.min(0.4, t.n / (S.whaleThr || 1e6))) + ')';
+        ctx.fillRect(x + 1, y, w - 2, rowH - 1);
+        const wide = w >= 165; ctx.textAlign = 'left';
+        if (wide) { ctx.fillStyle = C.muted; ctx.fillText(OF.hm(t.t, true), x + 4, y + rowH / 2); }
+        ctx.fillStyle = t.buy ? '#86efac' : '#fca5a5'; ctx.fillText(OF.fp(t.p), x + (wide ? 58 : 4), y + rowH / 2);
+        ctx.fillStyle = '#e5e7eb'; ctx.textAlign = 'right'; ctx.fillText('$' + k$(t.n), x + w - 4, y + rowH / 2);
+        y += rowH; nrow++;
+      }
+      hdr.push([x, w, 'tape ≥ $' + k$(min), `<g>B $${k$(f1.b)}</g> <r>S $${k$(f1.s)}</r>`]);
+    } else {
+      const sw = c.id === 'superdom' ? w / 5 : c.id === 'book' ? w / 2 : w;
+      for (let k = r0; k <= r1; k++) {
+        const y = rowY(k); if (y + ch < top || y > top + ph) continue;
+        const b = bid.get(k) || 0, a = ask.get(k) || 0, d = dl(k), above = k > mk || (k === mk && a && !b);
+        if (c.id === 'delta') { if (d) { bar(x, w, y, d / mD, d > 0 ? 'rgba(34,197,94,.45)' : 'rgba(239,68,68,.45)', true); txt(x, w, y, (d > 0 ? '+' : '') + k$(d), d > 0 ? '#86efac' : '#fca5a5'); } }
+        else if (c.id === 'book') {
+          if (b) { bar(x, sw, y, b / mBook, 'rgba(34,197,94,.55)', true); txt(x, sw, y, k$(b)); }
+          if (a) { bar(x + sw, sw, y, a / mBook, 'rgba(239,68,68,.55)', false); txt(x + sw, sw, y, k$(a)); }
+        } else if (c.id === 'cob' || c.id === 'size') {
+          const v = b || a; if (v) { const col = b ? 'rgba(34,197,94,' : 'rgba(239,68,68,'; if (c.id === 'cob') bar(x, w, y, v / mBook, col + '.6)', false); else { ctx.fillStyle = col + (0.1 + 0.5 * v / mBook) + ')'; ctx.fillRect(x + 1, y + 1, w - 2, ch - 2); } txt(x, w, y, k$(v)); }
+        } else if (c.id === 'superdom') {
+          const sv = vs.get(k) || 0, bv = vb.get(k) || 0;
+          if (sv) { bar(x, sw, y, sv / mVol, 'rgba(239,68,68,.35)', true); txt(x, sw, y, k$(sv), '#fca5a5'); }
+          if (b) { bar(x + sw, sw, y, b / mBook, 'rgba(34,197,94,.55)', true); txt(x + sw, sw, y, k$(b)); }
+          ctx.fillStyle = k === mk ? '#e5e7eb' : 'rgba(255,255,255,.03)'; ctx.fillRect(x + 2 * sw + 1, y + 1, sw - 2, ch - 2); txt(x + 2 * sw, sw, y, OF.fp(k * cb), k === mk ? '#000' : C.muted, 'center');
+          if (a) { bar(x + 3 * sw, sw, y, a / mBook, 'rgba(239,68,68,.55)', false); txt(x + 3 * sw, sw, y, k$(a)); }
+          if (bv) { bar(x + 4 * sw, sw, y, bv / mVol, 'rgba(34,197,94,.35)', false); txt(x + 4 * sw, sw, y, k$(bv), '#86efac'); }
+        } else if (c.id === 'cum') {
+          const v = above ? cumA.get(k) : cumB.get(k); if (v) { bar(x, w, y, v / mCum, above ? 'rgba(239,68,68,.35)' : 'rgba(34,197,94,.35)', false); txt(x, w, y, k$(v) ); }
+        } else if (c.id === 'volume') {
+          const bv = vb.get(k) || 0, sv = vs.get(k) || 0, t = bv + sv;
+          if (t) { const ws = sv / mVol * (w - 4), wb = bv / mVol * (w - 4); ctx.fillStyle = 'rgba(239,68,68,.55)'; ctx.fillRect(x + 2, y + 1, ws, ch - 2); ctx.fillStyle = 'rgba(34,197,94,.55)'; ctx.fillRect(x + 2 + ws, y + 1, wb, ch - 2); txt(x, w, y, k$(t)); }
+        } else if (c.id === 'svp') { const v = svp.get(k); if (v) { bar(x, w, y, v / mSvp, 'rgba(56,189,248,.5)', false); txt(x, w, y, k$(v)); } }
+        else if (c.id === 'cumd') { const v = cumD.get(k); if (v) { bar(x, w, y, v / mCD, v > 0 ? 'rgba(34,197,94,.3)' : 'rgba(239,68,68,.3)', true); txt(x, w, y, (v > 0 ? '+' : '') + k$(v), v > 0 ? '#86efac' : '#fca5a5'); } }
+        else if (c.id === 'cqc') { const v = q.get(k); if (v) { bar(x, w, y, v / mQ, 'rgba(167,139,250,.45)', false); txt(x, w, y, String(v)); } }
+      }
+      if (c.id === 'delta') { let t = 0; for (let k = r0; k <= r1; k++) t += dl(k); hdr.push([x, w, 'Δ sess', `<${t >= 0 ? 'g' : 'r'}>${t >= 0 ? '+' : ''}${k$(t)}</>`]); }
+      else if (c.id === 'book') { hdr.push([x, sw, 'bid $', `<g>${k$(sum(bid))}</g>`]); hdr.push([x + sw, sw, 'ask $', `<r>${k$(sum(ask))}</r>`]); }
+      else if (c.id === 'superdom') { [['sold', `<r>${k$(sum(vs))}</r>`], ['bid', `<g>${k$(sum(bid))}</g>`], ['price', OF.fp(cb) + '/row'], ['ask', `<r>${k$(sum(ask))}</r>`], ['bought', `<g>${k$(sum(vb))}</g>`]].forEach((h, i) => hdr.push([x + i * sw, sw, h[0], h[1]])); }
+      else if (c.id === 'cob') hdr.push([x, w, 'COB', k$(sum(bid) + sum(ask))]);
+      else if (c.id === 'size') hdr.push([x, w, 'size $', '']);
+      else if (c.id === 'cum') hdr.push([x, w, 'cum $', '']);
+      else if (c.id === 'volume') hdr.push([x, w, 'vol', k$(sum(vb) + sum(vs))]);
+      else if (c.id === 'svp') hdr.push([x, w, 'SVP day', k$(sum(svp))]);
+      else if (c.id === 'cumd') hdr.push([x, w, 'cum Δ', '']);
+      else if (c.id === 'cqc') hdr.push([x, w, 'CQC', '']);
+    }
+    hit.push([x, w, c.id]);
+    x += w;
+  }
+  // headers
+  ctx.fillStyle = '#0c1016'; ctx.fillRect(x0, top - 30, x - x0, 30);
+  ctx.font = '10px ui-monospace,Menlo,monospace'; ctx.textBaseline = 'middle';
+  for (const [hx, hw, a, b] of hdr) {
+    ctx.fillStyle = C.muted; ctx.textAlign = 'left'; ctx.fillText(a, hx + 4, top - 21);
+    const m = /<(g|r)>(.*?)<\//.exec(b || ''); ctx.fillStyle = m ? (m[1] === 'g' ? '#86efac' : '#fca5a5') : '#cbd5e1';
+    if (b && b.includes('<g>') && b.includes('<r>')) {
+      const g = /<g>(.*?)<\/g>/.exec(b)[1], r = /<r>(.*?)<\/r>/.exec(b)[1];
+      ctx.fillStyle = '#86efac'; ctx.fillText(g, hx + 4, top - 8); ctx.fillStyle = '#fca5a5'; ctx.textAlign = 'right'; ctx.fillText(r, hx + hw - 4, top - 8);
+    } else ctx.fillText(m ? m[2] : (b || ''), hx + 4, top - 8);
+  }
+  // hover readout
+  if (mouse && mouse.x >= x0 && mouse.x < x && mouse.y > top && mouse.y < top + ph) {
+    const p = lo + (top + ph - mouse.y) / ph * (hi - lo), k = key(p);
+    ui.tip(mouse.cx, mouse.cy, `<b>${OF.fp(k * cb)} – ${OF.fp((k + 1) * cb)}</b><br><span class="g">bid ${OF.fmtUsd(bid.get(k) || 0)}</span> · <span class="r">ask ${OF.fmtUsd(ask.get(k) || 0)}</span><br>traded: <span class="g">bought ${OF.fmtUsd(vb.get(k) || 0)}</span> · <span class="r">sold ${OF.fmtUsd(vs.get(k) || 0)}</span><br>delta ${OF.fmtUsd(dl(k), true)} · quote changes ${q.get(k) || 0}${svp.get(k) ? '<br>today’s volume here ' + OF.fmtUsd(svp.get(k)) : ''}`);
+  }
+  return x;
+}
+
+/* Columns panel (popover) */
+function colsPanel(view, anchor) {
+  let pop = document.getElementById('colsPop');
+  if (pop) { pop.remove(); return; }
+  const o = view.o, save = () => { LS.set('hm', o); view.updBtn(); };
+  pop = el('div', 'colspop'); pop.id = 'colsPop';
+  const r = anchor.getBoundingClientRect(); pop.style.top = (r.bottom + 6) + 'px'; pop.style.left = Math.max(8, Math.min(window.innerWidth - 430, r.left - 200)) + 'px';
+  const build = () => {
+    pop.innerHTML = '<div class="cph">Columns right of the chart <button class="cpx">✕</button></div>';
+    pop.querySelector('.cpx').onclick = () => pop.remove();
+    const pr = el('div', 'cppre');
+    PRESETS.forEach(([name, ids]) => { const b = el('button', '', name); b.onclick = () => { o.colOn = ids.slice(); o.colOrder = ids.concat(o.colOrder.filter(x => !ids.includes(x))); save(); build(); }; pr.appendChild(b); });
+    pop.appendChild(pr);
+    const list = el('div', 'cplist');
+    o.colOrder.forEach((id, i) => {
+      const row = el('div', 'cprow'), on = o.colOn.includes(id);
+      row.innerHTML = `<label><input type="checkbox" ${on ? 'checked' : ''}> <b>${COLS[id].label}</b> <span>${COLS[id].desc}</span></label><button ${i ? '' : 'disabled'}>↑</button><button ${i < o.colOrder.length - 1 ? '' : 'disabled'}>↓</button>`;
+      row.querySelector('input').onchange = e => { o.colOn = e.target.checked ? o.colOn.concat(id) : o.colOn.filter(x => x !== id); save(); };
+      const [up, dn] = row.querySelectorAll('button');
+      up.onclick = () => { const a = o.colOrder; [a[i - 1], a[i]] = [a[i], a[i - 1]]; save(); build(); };
+      dn.onclick = () => { const a = o.colOrder; [a[i + 1], a[i]] = [a[i], a[i + 1]]; save(); build(); };
+      list.appendChild(row);
+    });
+    pop.appendChild(list);
+    const cvd = el('div', 'cpbox'); cvd.innerHTML = `<label><input type="checkbox" ${o.cvd ? 'checked' : ''}> <b>CVD strip</b> <span>Cumulative delta line below the chart</span></label>`;
+    cvd.querySelector('input').onchange = e => { o.cvd = e.target.checked; save(); }; pop.appendChild(cvd);
+    const pl = el('div', 'cpbox');
+    pl.innerHTML = `<label><input type="checkbox" ${o.pl.on ? 'checked' : ''}> <b>Current price line</b> <span>Line across the chart at the live price</span></label>
+      <div class="cpline"><span>Colour</span><input type="color" value="${o.pl.color}"><span>Line</span><span class="seg">${['dashed', 'dots', 'solid'].map(s => `<button data-s="${s}" class="${o.pl.style === s ? 'on' : ''}">${s[0].toUpperCase() + s.slice(1)}</button>`).join('')}</span>
+      <span>Opacity</span><input type="range" min="10" max="100" value="${Math.round(o.pl.op * 100)}"><span class="mono">${Math.round(o.pl.op * 100)}%</span></div>`;
+    pl.querySelector('input[type=checkbox]').onchange = e => { o.pl.on = e.target.checked; save(); };
+    pl.querySelector('input[type=color]').oninput = e => { o.pl.color = e.target.value; save(); };
+    pl.querySelectorAll('[data-s]').forEach(b => b.onclick = () => { o.pl.style = b.dataset.s; save(); build(); });
+    const rg = pl.querySelector('input[type=range]'); rg.oninput = () => { o.pl.op = rg.value / 100; rg.nextElementSibling.textContent = rg.value + '%'; save(); };
+    pop.appendChild(pl);
+  };
+  build();
+  document.body.appendChild(pop);
+  setTimeout(() => document.addEventListener('pointerdown', function h(e) { if (!pop.contains(e.target) && e.target !== anchor) { pop.remove(); document.removeEventListener('pointerdown', h); } }), 0);
+}
+
 /* ===================== HEATMAP ===================== */
 OF.views.heatmap = {
-  label: 'Heatmap', title: 'Liquidity heatmap — resting orders over time, with trades as bubbles',
-  o: Object.assign({ span: 120, range: 0, contrast: 1, bubbles: 'auto', marks: 'pulls' }, LS.get('hm', {})),
+  label: 'Heatmap', title: 'Liquidity heatmap — resting orders over time, with trades as bubbles and order-flow columns',
+  o: (() => {
+    const o = Object.assign({ span: 120, range: 0, contrast: 1, bubbles: 'auto', marks: 'pulls', colOrder: COL_IDS.slice(), colOn: ['delta', 'book', 'tape'], cvd: false, pl: { on: true, color: '#e5e7eb', style: 'dashed', op: 1 } }, LS.get('hm', {}));
+    o.colOrder = o.colOrder.filter(x => COLS[x]).concat(COL_IDS.filter(x => !o.colOrder.includes(x)));
+    return o;
+  })(),
+  updBtn() { if (this.btn) this.btn.textContent = '▥ Columns (' + this.o.colOn.length + ')'; },
   toolbar(tb) {
     const o = this.o, save = () => LS.set('hm', o);
     tb.append(
@@ -15,12 +189,12 @@ OF.views.heatmap = {
       ui.seg('Contrast', [[0, 'Low'], [1, 'Med'], [2, 'High']], o.contrast, v => { o.contrast = v; save(); }),
       ui.seg('Bubbles', [['auto', 'Auto'], ['all', 'Trades'], ['off', 'Off']], o.bubbles, v => { o.bubbles = v; save(); }, 'Trades are grouped into short time slots (about 14 px wide) so bubbles do not overlap. Auto hides the smallest 60 %; Trades shows all.'),
       ui.seg('Markers', [['pulls', 'Pulls'], ['all', 'Pulls + adds'], ['off', 'Off']], o.marks, v => { o.marks = v; save(); }, '✕ = a large order pulled without trading, + = a large order added. Only the biggest 10 % in view are drawn (max 40).'));
+    this.btn = el('button', 'tgl on colsbtn', ''); this.updBtn();
+    this.btn.onclick = () => colsPanel(this, this.btn);
+    tb.append(this.btn);
   },
-  mount(v) {
-    this.c = ui.canvas(v);
-    this.c.cv.onmousemove = e => { const r = this.c.cv.getBoundingClientRect(); this.mouse = { x: e.clientX - r.left, y: e.clientY - r.top, cx: e.clientX, cy: e.clientY }; };
-    this.c.cv.onmouseleave = () => { this.mouse = null; ui.tip(); };
-  },
+  mount(v) { this.c = ui.canvas(v); ui.track(this); },
+  unmount() { const p = document.getElementById('colsPop'); if (p) p.remove(); },
   reading() {
     const w = OF.walls(0.25); if (!w) return 'Waiting for the order book…';
     const part = (s, x) => x ? `<b class="${s === 'bid' ? 'g' : 'r'}">${s} wall ${OF.fmtUsd(x.n)}</b> at ${OF.fp(x.p)} (${x.bp.toFixed(1)} bp ${s === 'bid' ? 'below' : 'above'}), standing ${x.standSec < 90 ? Math.round(x.standSec) + 's' : Math.round(x.standSec / 60) + ' min'}` + (x.pulls >= 3 ? ` · <b class="y">${x.pulls}× pulled nearby — may be a bluff</b>` : '') : '';
@@ -30,7 +204,12 @@ OF.views.heatmap = {
     const S = OF.S, c = this.c.fit(), ctx = c.ctx, W = c.w, H = c.h, o = this.o;
     ctx.fillStyle = C.bg; ctx.fillRect(0, 0, W, H);
     if (!S || !S.cols.length) { ui.msg(ctx, W, H, S && S.status === 'OFFLINE' ? 'Offline — ' + (S.err || 'reconnecting…') : 'Building the order book…'); return; }
-    const AX = 74, BK = 84, TB = 20, pw = W - AX - BK, ph = H - TB;
+    // layout: [heatmap | columns | price axis], CVD strip under everything
+    let list = o.colOrder.filter(id => o.colOn.includes(id)).map(id => ({ id, w: COLS[id].w }));
+    const AX = 74, TB = 20, TOP = list.length ? 30 : 0, CVH = o.cvd ? Math.min(90, Math.round(H * 0.16)) : 0;
+    let cw = list.reduce((a, x) => a + x.w, 0); const avail = W - AX - 220;
+    if (cw > avail) { const f = Math.max(0.6, avail / cw); list.forEach(x => x.w = Math.floor(x.w * f)); cw = list.reduce((a, x) => a + x.w, 0); while (list.length && cw > avail) cw -= list.pop().w; }
+    const pw = W - AX - cw, ph = H - TB - TOP - CVH;
     const now = OF.now(), spanMs = o.span * 1000, t0 = now - spanMs;
     const coarse = o.span > 1800, src = coarse ? S.colsC : S.cols, cols = src.slice(OF.lb(src, t0));
     const mid = OF.mid() || cols[cols.length - 1].mid;
@@ -43,7 +222,7 @@ OF.views.heatmap = {
       if (this.lo && Math.abs(this.lo - lo) / mid < 0.001) { lo = this.lo * 0.85 + lo * 0.15; hi = this.hi * 0.85 + hi * 0.15; }
       this.lo = lo; this.hi = hi;
     }
-    const bin = S.bin, Y = p => ph - (p - lo) / (hi - lo) * ph, X = t => (t - t0) / spanMs * pw;
+    const bin = S.bin, Y = p => TOP + ph - (p - lo) / (hi - lo) * ph, X = t => (t - t0) / spanMs * pw;
     let rb = OF.niceStep((hi - lo) / (ph / 4)); rb = Math.max(bin, Math.round(rb / bin) * bin);
     const r0 = Math.floor(lo / rb), nR = Math.ceil(hi / rb) - r0 + 1, rh = ph * rb / (hi - lo);
     const step = Math.max(1, Math.floor(cols.length / pw));
@@ -55,12 +234,12 @@ OF.views.heatmap = {
       grid.push([cl.t, g]);
       if (ci % (step * 4) === 0) for (let r = 0; r < nR; r++) if (g[r]) sample.push(g[r]);
     }
+    ctx.save(); ctx.beginPath(); ctx.rect(0, TOP, pw, ph); ctx.clip();
     const ref = OF.pctile(sample, 0.97) || 1, gm = [0.8, 0.55, 0.35][o.contrast];
     const base = (coarse ? 5000 : 500) * step, pxPerMs = pw / spanMs;
     for (let gi = 0; gi < grid.length; gi++) {
       const [t, g] = grid[gi];
-      // stretch each column to the next one (fills gaps when the browser throttled a background tab), max 10 s
-      const nt = gi + 1 < grid.length ? grid[gi + 1][0] : t + base;
+      const nt = gi + 1 < grid.length ? grid[gi + 1][0] : t + base;   // stretch to next column (fills throttled-tab gaps), max 10 s
       const x = X(t), w = Math.min(nt - t, 10000) * pxPerMs + 0.6;
       for (let r = 0; r < nR; r++) {
         const v = g[r]; if (!v) continue;
@@ -69,57 +248,41 @@ OF.views.heatmap = {
         ctx.fillRect(x, Y((r0 + r + 1) * rb), w, rh + 0.5);
       }
     }
-    this.geo = { lo, hi, t0, spanMs, pw, ph, rb, r0, grid };
-    // L3 markers: only the biggest pulls in view (and adds if asked), small so bubbles stay readable
     if (o.marks !== 'off') {
       const evs = S.events, ei = OF.lb(evs, t0), cand = [];
-      for (let i = ei; i < evs.length; i++) {
-        const e = evs[i]; if (e.p < lo || e.p > hi) continue;
-        if (e.type === 'pull' || (o.marks === 'all' && e.type === 'add')) cand.push(e);
-      }
+      for (let i = ei; i < evs.length; i++) { const e = evs[i]; if (e.p < lo || e.p > hi) continue; if (e.type === 'pull' || (o.marks === 'all' && e.type === 'add')) cand.push(e); }
       const floor = Math.max(S.l3Min * 3, OF.pctile(cand.map(e => e.n), 0.9));
       const show = cand.filter(e => e.n >= floor).sort((a, b) => b.n - a.n).slice(0, 40);
       ctx.lineWidth = 1.2; ctx.font = 'bold 8px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       for (const e of show) {
         const x = X(e.t), y = Y(e.p), col = e.side === 'bid' ? C.buy : C.sell;
-        ctx.beginPath(); ctx.arc(x, y, 4.5, 0, 7);
-        ctx.fillStyle = e.type === 'pull' ? col : 'rgba(0,0,0,.6)'; ctx.fill(); ctx.strokeStyle = '#0a0d12'; ctx.stroke();
+        ctx.beginPath(); ctx.arc(x, y, 4.5, 0, 7); ctx.fillStyle = e.type === 'pull' ? col : 'rgba(0,0,0,.6)'; ctx.fill(); ctx.strokeStyle = '#0a0d12'; ctx.stroke();
         ctx.fillStyle = e.type === 'pull' ? '#fff' : col; ctx.fillText(e.type === 'pull' ? '✕' : '+', x, y + 0.5);
       }
     }
-    // trade bubbles: merge 0.5-s buckets into ~14-px time slots so bubbles never pile on top of each other
     if (o.bubbles !== 'off') {
-      const slotMs = Math.max(500, Math.round(14 / pxPerMs / 500) * 500), slots = new Map();
-      const bs = S.bubbles;
-      for (let i = OF.lb(bs, t0); i < bs.length; i++) {
-        const b = bs[i], k = Math.floor(b.t / slotMs) * slotMs;
-        let s = slots.get(k); if (!s) { s = { t: k, bn: 0, bpq: 0, sn: 0, spq: 0 }; slots.set(k, s); }
-        s.bn += b.bn; s.bpq += b.bpq; s.sn += b.sn; s.spq += b.spq;
-      }
-      const list = []; let mx = 0;
-      for (const s of slots.values()) for (const side of ['b', 's']) {
-        const n = s[side + 'n']; if (!n) continue; const p = s[side + 'pq'] / n;
-        if (p < lo || p > hi) continue; list.push({ t: s.t, n, p, buy: side === 'b' }); if (n > mx) mx = n;
-      }
-      const min = o.bubbles === 'auto' ? OF.pctile(list.map(x => x.n), 0.6) : 0, R = OF.clamp(ph / 22, 10, 26);
-      list.sort((a, b) => b.n - a.n);   // big first, small drawn on top
-      for (const b of list) {
+      const slotMs = Math.max(500, Math.round(14 / pxPerMs / 500) * 500), slots = new Map(), bs = S.bubbles;
+      for (let i = OF.lb(bs, t0); i < bs.length; i++) { const b = bs[i], k = Math.floor(b.t / slotMs) * slotMs; let s = slots.get(k); if (!s) { s = { t: k, bn: 0, bpq: 0, sn: 0, spq: 0 }; slots.set(k, s); } s.bn += b.bn; s.bpq += b.bpq; s.sn += b.sn; s.spq += b.spq; }
+      const blist = []; let mx = 0;
+      for (const s of slots.values()) for (const side of ['b', 's']) { const n = s[side + 'n']; if (!n) continue; const p = s[side + 'pq'] / n; if (p < lo || p > hi) continue; blist.push({ t: s.t, n, p, buy: side === 'b' }); if (n > mx) mx = n; }
+      const min = o.bubbles === 'auto' ? OF.pctile(blist.map(x => x.n), 0.6) : 0, R = OF.clamp(ph / 22, 10, 26);
+      blist.sort((a, b) => b.n - a.n);
+      for (const b of blist) {
         if (b.n < min) continue;
         const r = Math.max(2.5, Math.sqrt(b.n / mx) * R), x = X(b.t + slotMs / 2), y = Y(b.p);
-        ctx.beginPath(); ctx.arc(x, y, r, 0, 7);
-        ctx.fillStyle = b.buy ? 'rgba(34,197,94,.55)' : 'rgba(239,68,68,.55)'; ctx.fill();
+        ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.fillStyle = b.buy ? 'rgba(34,197,94,.55)' : 'rgba(239,68,68,.55)'; ctx.fill();
         ctx.strokeStyle = b.buy ? '#bbf7d0' : '#fecaca'; ctx.lineWidth = r > 8 ? 1.5 : 1; ctx.stroke();
-        if (r >= 14) { ctx.fillStyle = '#fff'; ctx.font = 'bold 10px ui-monospace,monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(OF.fmtUsd(b.n).replace('$', ''), x, y); }
+        if (r >= 14) { ctx.fillStyle = '#fff'; ctx.font = 'bold 10px ui-monospace,monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(k$(b.n), x, y); }
       }
       this.bubbleSlot = slotMs;
     }
-    // legend (bottom-left, out of the way of the plan labels)
-    ctx.fillStyle = 'rgba(10,13,18,.85)'; ctx.fillRect(6, ph - 36, 270, 30);
-    for (let i = 0; i < 120; i++) { ctx.fillStyle = OF.heatLUT[Math.round(i / 119 * 255)]; ctx.fillRect(10 + i, ph - 32, 1, 8); }
+    ctx.restore();
+    // legend
+    ctx.fillStyle = 'rgba(10,13,18,.85)'; ctx.fillRect(6, TOP + ph - 36, 270, 30);
+    for (let i = 0; i < 120; i++) { ctx.fillStyle = OF.heatLUT[Math.round(i / 119 * 255)]; ctx.fillRect(10 + i, TOP + ph - 32, 1, 8); }
     ctx.font = '10px ui-monospace,monospace'; ctx.fillStyle = C.muted; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
-    ctx.fillText('≤' + OF.fmtUsd(ref * 0.05) + ' … ' + OF.fmtUsd(ref) + '+ resting', 134, ph - 33);
-    ctx.fillText((coarse ? '5-s' : '0.5-s') + ' book columns · bubbles = trades per ' + ((this.bubbleSlot || 500) / 1000) + ' s', 10, ph - 20);
-    // plan lines
+    ctx.fillText('≤' + OF.fmtUsd(ref * 0.05) + ' … ' + OF.fmtUsd(ref) + '+ resting', 134, TOP + ph - 33);
+    ctx.fillText((coarse ? '5-s' : '0.5-s') + ' book columns · bubbles = trades per ' + ((this.bubbleSlot || 500) / 1000) + ' s', 10, TOP + ph - 20);
     const d = OF.lastDecision;
     if (OF.app.lines.plan && d && d.plan) {
       if (d.plan.buyAbove && d.plan.buyAbove < hi) ui.hline(ctx, 0, pw, Y(d.plan.buyAbove), C.buy, [2, 3], '▲ buy above ' + OF.fp(d.plan.buyAbove));
@@ -127,32 +290,40 @@ OF.views.heatmap = {
     }
     if (OF.app.lines.liq) OF.drawLiqLines(ctx, pw, Y, lo, hi);
     if (OF.app.lines.gamma) OF.drawGammaLines(ctx, pw, Y, lo, hi);
-    // book on the right
-    ctx.fillStyle = C.panel; ctx.fillRect(pw, 0, BK, ph);
-    const bk = OF.bookBins(Math.max(0.05, (hi - lo) / mid * 60), rb); let bmx = 0;
-    for (const v of bk.b.values()) bmx = Math.max(bmx, v); for (const v of bk.a.values()) bmx = Math.max(bmx, v);
-    const top = [];
-    for (const [m, col] of [[bk.b, C.buyA], [bk.a, C.sellA]]) for (const [p, v] of m) {
-      if (p < lo || p > hi) continue; const w = v / bmx * (BK - 4);
-      ctx.fillStyle = col + '.55)'; ctx.fillRect(pw + BK - w, Y(p + rb), w, Math.max(1, rh - 0.5)); top.push([p, v]);
-    }
-    top.sort((a, b) => b[1] - a[1]); ctx.font = '10px ui-monospace,monospace'; ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
-    for (const [p, v] of top.slice(0, 4)) { ctx.fillStyle = '#e5e7eb'; ctx.fillText(OF.fmtUsd(v), pw + BK - 3, Y(p + rb / 2)); }
+    if (OF.app.lines.walls) OF.drawWallLines(ctx, pw, Y, lo, hi);
+    // columns
+    if (list.length) drawColumns(ctx, pw, TOP, ph, lo, hi, rb, Y, list, o, this.mouse);
     // axes
-    ui.priceAxis(ctx, pw + BK, pw + BK, 0, ph, lo, hi);
-    ctx.fillStyle = C.bg; ctx.fillRect(0, ph, W, TB);
-    ui.timeAxis(ctx, 0, pw, ph, t0, now, 100);
-    // last price
-    if (S.last) { const y = Y(S.last); ui.hline(ctx, 0, pw + BK, y, '#e5e7eb', [3, 3]); ui.tag(ctx, pw + BK + 1, y, OF.fp(S.last), '#e5e7eb', '#000'); }
-    // hover
-    const cp = ui.cross(ctx, this.mouse, 0, pw + BK, 0, ph, lo, hi, pw + BK + 1, x => x < pw ? t0 + x / pw * spanMs : null);
-    if (cp == null || this.mouse.x >= pw) ui.tip();
-    if (this.mouse && this.mouse.x < pw && this.mouse.y < ph) {
-      const m = this.mouse, p = lo + (ph - m.y) / ph * (hi - lo), t = t0 + m.x / pw * spanMs;
+    ctx.fillStyle = C.bg; ctx.fillRect(pw + cw, 0, AX, TOP);
+    ui.priceAxis(ctx, pw + cw, pw + cw, TOP, ph, lo, hi);
+    ctx.fillStyle = C.bg; ctx.fillRect(0, TOP + ph, W, TB);
+    ui.timeAxis(ctx, 0, pw, TOP + ph, t0, now, 100);
+    // CVD strip
+    if (CVH) {
+      const y0 = TOP + ph + TB, tr = S.trades; ctx.fillStyle = C.panel; ctx.fillRect(0, y0, W, CVH);
+      const pts = []; let cum = 0, mn = 0, mx = 0, lastX = -1;
+      for (let i = OF.lb(tr, t0); i < tr.length; i++) { const t = tr[i]; cum += t.buy ? t.n : -t.n; const x = Math.round(X(t.t)); if (x !== lastX) { pts.push([x, cum]); lastX = x; } else pts[pts.length - 1][1] = cum; mn = Math.min(mn, cum); mx = Math.max(mx, cum); }
+      const YC = v => y0 + 6 + (CVH - 12) - (v - mn) / ((mx - mn) || 1) * (CVH - 12);
+      ui.hline(ctx, 0, pw, YC(0), C.faint, [2, 3]);
+      ctx.strokeStyle = cum >= 0 ? C.buy : C.sell; ctx.lineWidth = 1.5; ctx.beginPath(); pts.forEach(([x, v], i) => i ? ctx.lineTo(x, YC(v)) : ctx.moveTo(x, YC(v))); ctx.stroke(); ctx.lineWidth = 1;
+      ctx.font = '10px ui-monospace,monospace'; ctx.fillStyle = C.muted; ctx.textAlign = 'left'; ctx.textBaseline = 'top'; ctx.fillText('CVD (this span)', 6, y0 + 3);
+      ui.tag(ctx, pw + cw + 1, YC(cum), OF.fmtUsd(cum, true), cum >= 0 ? C.buy : C.sell, '#000');
+    }
+    // current price line
+    if (S.last && o.pl.on) {
+      const y = Y(S.last); ctx.save(); ctx.globalAlpha = o.pl.op;
+      ui.hline(ctx, 0, pw + cw, y, o.pl.color, o.pl.style === 'solid' ? [] : o.pl.style === 'dots' ? [1, 3] : [5, 4]); ctx.restore();
+    }
+    if (S.last) ui.tag(ctx, pw + cw + 1, Y(S.last), OF.fp(S.last), '#e5e7eb', '#000');
+    // hover on the heatmap
+    const m = this.mouse;
+    ui.cross(ctx, m, 0, pw + cw, TOP, ph, lo, hi, pw + cw + 1, x => x < pw ? t0 + x / pw * spanMs : null);
+    if (m && m.x < pw && m.y > TOP && m.y < TOP + ph) {
+      const p = lo + (TOP + ph - m.y) / ph * (hi - lo), t = t0 + m.x / pw * spanMs;
       let best = null; for (const gr of grid) if (!best || Math.abs(gr[0] - t) < Math.abs(best[0] - t)) best = gr;
       const r = Math.floor(p / rb) - r0, v = best ? best[1][r] : 0;
       ui.tip(m.cx, m.cy, `<b>${OF.fp(Math.floor(p / rb) * rb)}</b> · ${OF.hm(t, true)}<br>resting ${OF.fmtUsd(v || 0)}`);
-    }
+    } else if (!m || !(m.x >= pw && m.x < pw + cw && m.y > TOP && m.y < TOP + ph)) ui.tip();
   }
 };
 

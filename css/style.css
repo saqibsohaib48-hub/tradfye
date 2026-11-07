@@ -218,3 +218,21 @@ input.num{width:84px;background:var(--panel2);border-radius:5px;padding:3px 6px;
 .pbar b{position:absolute;top:-4px;width:2px;height:16px;background:#fff}
 .chk{display:grid;grid-template-columns:16px 230px 1fr;gap:6px;align-items:baseline;padding:2px 0;font-size:12px}
 .chk.ok>span:first-child{color:var(--buy)}.chk.no>span:first-child{color:var(--sell)}.chk.no b{color:#9ca3af;font-weight:500}
+
+/* heatmap columns panel */
+.colsbtn{border:1px solid rgba(245,183,10,.5)}
+.colspop{position:fixed;z-index:80;width:420px;max-width:96vw;max-height:72vh;overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px;box-shadow:0 20px 50px #000c}
+.cph{display:flex;justify-content:space-between;align-items:center;font-weight:700;font-size:14px;margin-bottom:8px}
+.cph button{color:var(--muted);padding:2px 6px}
+.cppre{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:8px}
+.cppre button{border:1px solid var(--line);border-radius:5px;padding:3px 8px;font-size:12px;color:#cbd5e1}.cppre button:hover{background:var(--panel2)}
+.cplist{border:1px solid var(--line);border-radius:8px;margin-bottom:8px}
+.cprow{display:grid;grid-template-columns:1fr 24px 24px;align-items:center;gap:2px;padding:4px 8px;border-bottom:1px solid #121821}
+.cprow label,.cpbox label{display:flex;gap:6px;align-items:baseline;font-size:12px;cursor:pointer;min-width:0}
+.cprow label span,.cpbox label span{color:var(--muted);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cprow button{color:var(--muted)}.cprow button:disabled{opacity:.25}
+.cpbox{border:1px solid var(--line);border-radius:8px;padding:6px 8px;margin-bottom:8px}
+.cpline{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:6px;font-size:11px;color:var(--muted)}
+.cpline input[type=color]{width:28px;height:20px;border:0;background:none;padding:0}
+.cpline input[type=range]{width:110px}
+input[type=checkbox]{accent-color:#3b82f6}
