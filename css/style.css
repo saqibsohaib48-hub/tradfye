@@ -206,7 +206,7 @@ input.num{width:84px;background:var(--panel2);border-radius:5px;padding:3px 6px;
 .plsh{font-weight:700;font-size:15px}
 .plsb{font-size:12.5px;color:#cbd5e1;margin-top:2px}
 .plev{display:flex;flex-wrap:wrap;gap:4px 14px;margin-top:5px;font-size:11px;color:var(--muted);font-family:var(--mono)}
-.view.plfull #plTop,.view.plfull #plSide,.view.plfull #plFactors{display:none}
+.view.plfull #plTop,.view.plfull #plMain,.view.plfull #plSide,.view.plfull #plFactors{display:none!important}
 .view.plfull .plgrid{grid-template-columns:1fr}
 .view.plfull .plchart{height:calc(100% - 96px);min-height:420px}
 .view.plfull{display:flex;flex-direction:column}

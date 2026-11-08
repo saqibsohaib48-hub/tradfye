@@ -365,11 +365,22 @@ OF.views.plan = {
     v.innerHTML = '<div id="plMain"></div><div class="plgrid"><div class="gbox plchart" id="plChart"></div><div id="plSide"></div></div><div id="plFactors"></div>';
     this.c = ui.canvas(document.getElementById('plChart')); ui.track(this);
     const cv = this.c.cv; let drag = null;
-    cv.onwheel = e => { e.preventDefault(); this.zv.n = OF.clamp(Math.round(this.zv.n * (e.deltaY > 0 ? 1.15 : 0.87)), 15, 600); };
-    cv.onmousedown = e => { drag = { x: e.clientX, off: this.zv.off }; };
+    this.yz = 1; this.yoff = 0;
+    const onAxis = e => { const r = cv.getBoundingClientRect(); return e.clientX - r.left > (this.pw || 1e9); };
+    cv.onwheel = e => {
+      e.preventDefault();
+      if (e.shiftKey || onAxis(e)) this.yz = OF.clamp(this.yz * (e.deltaY > 0 ? 1.12 : 0.89), 0.05, 20);   // price zoom
+      else this.zv.n = OF.clamp(Math.round(this.zv.n * (e.deltaY > 0 ? 1.15 : 0.87)), 10, 600);               // time zoom
+    };
+    cv.onmousedown = e => { drag = { x: e.clientX, y: e.clientY, off: this.zv.off, yoff: this.yoff, axis: onAxis(e) }; };
     window.addEventListener('mouseup', () => drag = null);
-    cv.addEventListener('mousemove', e => { if (drag && this.bw) this.zv.off = Math.max(0, drag.off + Math.round((e.clientX - drag.x) / this.bw)); });
-    cv.ondblclick = () => { this.zv = { n: 72, off: 0 }; };
+    cv.addEventListener('mousemove', e => {
+      if (!drag) return;
+      if (drag.axis) { if (this.ppx) this.yz = OF.clamp(this.yz * Math.exp((e.clientY - drag.y) / 300), 0.05, 20), drag.y = e.clientY; return; }
+      if (this.bw) this.zv.off = Math.max(0, drag.off + Math.round((e.clientX - drag.x) / this.bw));
+      if (this.ppx) this.yoff = drag.yoff + (e.clientY - drag.y) * this.ppx;
+    });
+    cv.ondblclick = () => { this.zv = { n: 72, off: 0 }; this.yz = 1; this.yoff = 0; };
     this.load(); this.renderSub(); this.applyFull(); this.lastHtml = 0;
   },
   /* follow every open trade through the trades (and 1h candles for time the page was closed) */
@@ -432,7 +443,7 @@ OF.views.plan = {
       const card = L => {
         const st = statusOf(L, px), h = this.health(L);
         return `<div class="trd ${st.cls}" data-id="${L.id}">
-          <div class="trh">${pill(L.dir)} <b>${L.symbol}</b> <span class="muted sm">${MODES[L.mode] ? MODES[L.mode].name : L.mode} · tracked ${dstr(L.created)}</span><span class="trb"><button data-a="close">✋ I closed it (at ${fp(px)})</button><button data-a="del" title="Remove from the list">🗑</button></span></div>
+          <div class="trh">${pill(L.dir)} <b>${L.symbol}</b> <span class="muted sm">${MODES[L.mode] ? MODES[L.mode].name : L.mode} · tracked ${dstr(L.created)}</span><span class="trb"><button data-a="mode" title="Move this trade to the other mode (which chart it shows on)">↔ make ${L.mode === 'swing' ? 'Intraday' : 'Swing'}</button><button data-a="close">✋ I closed it (at ${fp(px)})</button><button data-a="del" title="Remove from the list">🗑</button></span></div>
           <div class="plstatus ${st.cls}"><span class="pli">${st.icon}</span><div><div class="plsh">${st.head}</div><div class="plsb">${st.body}</div></div></div>
           <div class="trn mono"><span>Entry <b>${fp(L.entry)}</b></span><span class="r">Stop <b>${fp(L.stopNow)}</b>${L.stopNow !== L.stop ? ' (moved)' : ''}</span><span class="g">TP1 <b>${fp(L.tp1)}</b></span><span class="g">TP2 <b>${fp(L.tp2)}</b></span><span>Size <b>${L.qty ? (L.qty < 1 ? L.qty.toFixed(4) : L.qty.toFixed(3)) + ' ' + S.info.base : '—'}</b></span></div>
           <div class="hl ${h.cls}"><div class="hlv">Health check: <b>${h.v}</b> — ${h.act || ''}</div>${h.items.map(([c, t]) => `<div class="hli ${c}">${c === 'ok' ? '✓' : c === 'bad' ? '✗' : '!'} ${t}</div>`).join('')}<div class="muted sm">Re-checked every 15 s against the latest ${MODES[L.mode] ? MODES[L.mode].name : ''} analysis and key points. Rules, not advice — you decide.</div></div>
@@ -446,6 +457,7 @@ OF.views.plan = {
       cardsBox.querySelectorAll('.trd').forEach(div => {
         const L = this.T.find(t => String(t.id) === div.dataset.id);
         div.querySelector('[data-a=close]').onclick = () => { if (L.state === 'tp1') L.halfOff = true; L.state = 'closed'; L.exitPx = S.last; L.closedAt = OF.now(); L.events.push([OF.now(), 'Closed by you at ' + OF.fp(S.last)]); this.saveT(); this.html(); };
+        div.querySelector('[data-a=mode]').onclick = () => { L.mode = L.mode === 'swing' ? 'intraday' : 'swing'; L.expires = L.created + MODES[L.mode].exp; L.expLabel = MODES[L.mode].expLabel; this.saveT(); this.html(); };
         div.querySelector('[data-a=del]').onclick = () => { this.T = this.T.filter(t => t !== L); this.saveT(); this.html(); };
       });
       const f = main.querySelector('.addf');
@@ -515,15 +527,18 @@ OF.views.plan = {
     ctx.fillStyle = C.bg; ctx.fillRect(0, 0, W, H);
     if (!p || p.wait) { ui.msg(ctx, W, H, p ? p.wait : 'Loading…'); return; }
     const tf = this.isScalp() ? this.o.ctfS : this.o.ctf, k = S.k[tf]; if (!k || !k.length) { OF.loadKlines(tf); ui.msg(ctx, W, H, 'Loading ' + tf + ' candles…'); return; }
-    const ms = OF.tfMs[tf], AX = 80, TB = 18, pw = W - AX, ph = H - TB, open = this.openT();
+    const ms = OF.tfMs[tf], AX = 80, TB = 18, pw = W - AX, ph = H - TB, allOpen = this.openT(), open = allOpen.filter(L => (L.mode || 'intraday') === this.o.mode), others = allOpen.length - open.length;
+    this.pw = pw;
     const n = Math.min(this.zv.n, k.length), end = Math.max(n, k.length - this.zv.off), i0 = Math.max(0, end - n);
     const bw = pw / (n + Math.max(6, n * 0.18)), X = i => (i - i0 + 0.5) * bw; this.bw = bw;
     const nxt = this.o.sub !== 'open' ? p.plan : null, lv = [];
     open.forEach(L => lv.push(L.entry, L.stopNow, L.tp1, L.tp2)); if (nxt) lv.push(nxt.entry, nxt.stop, nxt.tp1, nxt.tp2);
     let lo = Infinity, hi = -Infinity; for (let i = i0; i < end; i++) { lo = Math.min(lo, k[i].l); hi = Math.max(hi, k[i].h); }
-    lv.forEach(v => { lo = Math.min(lo, v); hi = Math.max(hi, v); });
+    // include trade levels only if they are reasonably close; far ones become edge arrows (they used to flatten the candles)
+    const span0 = hi - lo; lv.forEach(v => { if (v > lo - span0 * 0.8 && v < hi + span0 * 0.8) { lo = Math.min(lo, v); hi = Math.max(hi, v); } });
     const pad = (hi - lo) * 0.05; lo -= pad; hi += pad;
-    const Y = v => 6 + (ph - 12) - (v - lo) / (hi - lo) * (ph - 12);
+    { const mid = (lo + hi) / 2 + this.yoff, half = (hi - lo) / 2 * this.yz; lo = mid - half; hi = mid + half; }
+    const Y = v => 6 + (ph - 12) - (v - lo) / (hi - lo) * (ph - 12); this.ppx = (hi - lo) / (ph - 12);
     ui.priceAxis(ctx, 0, pw, 6, ph - 12, lo, hi);
     ui.timeAxis(ctx, 0, (end - i0) * bw, ph, k[i0].t, k[end - 1].t + ms, 90);
     for (const z of p.zones) {
@@ -555,10 +570,20 @@ OF.views.plan = {
       ui.hline(ctx, 0, pw, Y(nxt.tp1), '#86efac', [6, 4], 'NEXT TP1 ' + OF.fp(nxt.tp1), lx);
       ui.hline(ctx, 0, pw, Y(nxt.tp2), '#86efac', [2, 4], 'NEXT TP2 ' + OF.fp(nxt.tp2), lx);
     }
+    // off-screen levels: arrows at the top / bottom edge
+    const offUp = [], offDn = [];
+    open.forEach((L, idx) => [['entry', L.entry, '#e5e7eb'], ['stop', L.stopNow, C.sell], ['TP1', L.tp1, C.buy], ['TP2', L.tp2, C.buy]].forEach(([t, v, col]) => {
+      if (v > hi) offUp.push([`↑ #${idx + 1} ${L.dir > 0 ? 'LONG' : 'SHORT'} ${t} ${OF.fp(v)} (${((v / S.last - 1) * 100).toFixed(2)}%)`, col]);
+      else if (v < lo) offDn.push([`↓ #${idx + 1} ${L.dir > 0 ? 'LONG' : 'SHORT'} ${t} ${OF.fp(v)} (${((v / S.last - 1) * 100).toFixed(2)}%)`, col]);
+    }));
+    ctx.font = '11px ui-monospace,monospace'; ctx.textAlign = 'right';
+    offUp.forEach(([t, col], i) => { ctx.textBaseline = 'top'; ctx.fillStyle = 'rgba(10,13,18,.8)'; ctx.fillRect(pw - ctx.measureText(t).width - 10, 22 + i * 14, ctx.measureText(t).width + 8, 13); ctx.fillStyle = col; ctx.fillText(t, pw - 6, 22 + i * 14); });
+    offDn.forEach(([t, col], i) => { ctx.textBaseline = 'bottom'; ctx.fillStyle = 'rgba(10,13,18,.8)'; ctx.fillRect(pw - ctx.measureText(t).width - 10, ph - 8 - (i + 1) * 14, ctx.measureText(t).width + 8, 13); ctx.fillStyle = col; ctx.fillText(t, pw - 6, ph - 8 - i * 14); });
     OF.drawKeyLevels(ctx, 0, pw, Y, lo, hi);
     if (S.last) { ui.hline(ctx, 0, pw, Y(S.last), 'rgba(229,231,235,.5)', [1, 3]); ui.tag(ctx, pw + 1, Y(S.last), OF.fp(S.last), '#e5e7eb', '#000'); }
     ctx.font = '11px ui-monospace,monospace'; ctx.fillStyle = C.muted; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
-    ctx.fillText(S.symbol + ' · ' + tf + ' · solid = your open trades · dashed = next plan · scroll = zoom · drag = pan', 8, 8);
+    ctx.fillText(S.symbol + ' · ' + tf + ' · ' + MODES[this.o.mode].name + ' trades solid, next plan dashed · scroll = time zoom · scroll on price scale (or Shift) = price zoom · drag = pan · double-click = reset', 8, 8);
+    if (others) { ctx.fillStyle = C.amber; ctx.fillText(`${others} ${this.o.mode === 'swing' ? 'intraday' : 'swing'} trade${others > 1 ? 's' : ''} not shown here — switch Mode to ${this.o.mode === 'swing' ? 'Intraday 1h' : '📅 Swing 1D'} to see ${others > 1 ? 'them' : 'it'}`, 8, 22); }
     ui.cross(ctx, this.mouse, 0, pw, 6, ph - 12, lo, hi, pw + 1, x => k[i0].t + (x / bw) * ms);
   }
 };
