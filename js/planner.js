@@ -180,8 +180,10 @@ OF.tradePlan = function () {
   if (plan && rsi < 22 && side < 0 && plan.eType === 'market') { why.push('1h RSI is below 22 — wait for the bounce limit instead of selling here'); plan.eType = 'limit'; }
   const conf = Math.round(OF.clamp(Math.abs(bias) * 100 * 0.7 + agree * 40 + (plan && plan.base && strong(plan.base) ? 10 : 0), 0, 95));
   const ref = plan || (Math.abs(bias) > 0 ? (bias > 0 ? long : short) : long);
-  const prob = backtest(k1, ref.dir, ref.risk / OF.atr(k1), ref.rr1, ref.rr2, 24, 'last ' + Math.round(k1.length / 24) + ' days of 1h candles');
-  return { at: Date.now(), px, atr, atr4, bias, agree, factors: F, zones, sup, res, long, short, side: plan ? side : 0, plan, why, conf, rsi, recH, prob,
+  const a1 = OF.atr(k1), lbl = 'last ' + Math.round(k1.length / 24) + ' days of 1h candles';
+  const probL = backtest(k1, 1, long.risk / a1, long.rr1, long.rr2, 24, lbl), probS = backtest(k1, -1, short.risk / a1, short.rr1, short.rr2, 24, lbl);
+  const prob = ref.dir > 0 ? probL : probS;
+  return { at: Date.now(), px, atr, atr4, bias, agree, factors: F, zones, sup, res, long, short, side: plan ? side : 0, plan, why, conf, rsi, recH, prob, probL, probS, trigTf: '1h',
     verdict: plan ? (side > 0 ? 'LONG' : 'SHORT') : 'NO TRADE' };
 };
 
@@ -263,10 +265,12 @@ OF.swingPlan = function () {
   const confirmed = passed >= 7 && keyOk && Math.abs(bias) >= 0.15 && pl.rr1 >= 1.2;
   const why = confirmed ? [] : [`${passed}/9 checks pass` + (keyOk ? '' : ' and a key check fails')];
   const hist = kd.slice(0, -1);
-  const prob = backtest(hist, dir, pl.risk / atr, pl.rr1, pl.rr2, 15, 'last ' + (hist.length / 365).toFixed(1) + ' years of daily candles');
+  const lblD = 'last ' + (hist.length / 365).toFixed(1) + ' years of daily candles';
+  const probL = backtest(hist, 1, long.risk / atr, long.rr1, long.rr2, 15, lblD), probS = backtest(hist, -1, short.risk / atr, short.rr1, short.rr2, 15, lblD);
+  const prob = dir > 0 ? probL : probS;
   const conf = Math.round(OF.clamp(passed / 9 * 60 + Math.abs(bias) * 40, 0, 95));
   return { at: Date.now(), scalp: true, px, atr, bias, agree, factors: F, zones, sup, res, long, short, plan: confirmed ? pl : null, idea: pl, side: confirmed ? dir : 0,
-    checks: CH, passed, why, conf, prob, verdict: confirmed ? (dir > 0 ? 'LONG SWING' : 'SHORT SWING') : 'NO SWING' };
+    checks: CH, passed, why, conf, prob, probL, probS, trigTf: 'daily', verdict: confirmed ? (dir > 0 ? 'LONG SWING' : 'SHORT SWING') : 'NO SWING' };
 };
 
 /* ===================== TRADE PLAN TAB =====================
@@ -491,25 +495,36 @@ OF.views.plan = {
     const pl = p.plan;
     let head, body, cls = 'wait', icon = '⏳';
     if (pl) { cls = 'on'; icon = '✨'; head = `NEXT PLAN: ${pl.dir > 0 ? 'LONG' : 'SHORT'} ${pl.eType === 'limit' ? 'limit at ' + fmt(pl.entry) : 'at market ' + fmt(pl.entry)}`; body = `Stop ${fmt(pl.stop)} · TP1 ${fmt(pl.tp1)} (${pl.rr1.toFixed(1)}R) · TP2 ${fmt(pl.tp2)} (${pl.rr2.toFixed(1)}R). Levels keep updating until you press <b>Track this plan</b>, which freezes them and adds the trade to My trades.`; }
-    else if (p.scalp) { head = `NO CONFIRMED SWING — ${p.passed}/9 checks pass`; body = `Missing: ${p.checks.filter(c => !c.ok).map(c => c.name).join(' · ')}. Do nothing yet.`; }
-    else { head = 'NO TRADE right now'; body = `${p.why.join('; ')}. Watch for a 1h close above <b>${fmt(p.long.trigger)}</b> (long idea) or below <b>${fmt(p.short.trigger)}</b> (short idea).`; }
+    else if (p.scalp) { const rb = rankIdeas(p)[0]; head = `NO CONFIRMED SWING — ${p.passed}/9 checks pass`; body = `Missing: ${p.checks.filter(c => !c.ok).map(c => c.name).join(' · ')}. Do nothing yet. <b>More likely next: ${rb.q.dir > 0 ? 'LONG' : 'SHORT'}</b> — ${rb.why.join(', ')}. Both ideas are drawn on the chart.${rankIdeas(p).bothBad ? ' <b class="y">Both ideas have lost money at these levels in the past (win % below break-even) — waiting is the better choice.</b>' : ''}`; }
+    else { const rb = rankIdeas(p)[0]; head = 'NO TRADE right now'; body = `${p.why.join('; ')}. Watch for a 1h close above <b>${fmt(p.long.trigger)}</b> (long idea) or below <b>${fmt(p.short.trigger)}</b> (short idea). <b>More likely next: ${rb.q.dir > 0 ? 'LONG' : 'SHORT'}</b> — ${rb.why.join(', ')}. Both ideas are drawn on the chart.${rankIdeas(p).bothBad ? ' <b class="y">Both ideas have lost money at these levels in the past (win % below break-even) — waiting is the better choice.</b>' : ''}`; }
     const pr = p.prob;
     const probHtml = !pr ? '' : !pr.decided ? `<div class="plcard"><div class="plh"><b>Win probability</b></div><div class="muted sm">No similar setups found in the ${pr.label}.</div></div>` : (() => {
       const w = Math.round(pr.win * 100), be = Math.round(pr.be * 100), edge = w - be, c = edge >= 5 ? 'g' : edge >= 0 ? 'y' : 'r';
       return `<div class="plcard prob"><div class="plh"><b>Win probability (TP1 before stop)</b><span class="muted sm">measured, not guessed</span></div><div class="pbig ${c}">${w}%</div><div class="pbar"><i style="width:${w}%"></i><b style="left:${be}%"></b></div>
         <div class="muted sm">From <b>${pr.decided}</b> similar setups in the ${pr.label}${pr.decided < 30 ? ' — <span class="y">small sample</span>' : ''}. Break-even needs <b>${be}%</b> → edge <b class="${c}">${edge >= 0 ? '+' : ''}${edge}%</b>. Average ${pr.exp >= 0 ? '+' : ''}${pr.exp.toFixed(2)}R per setup.</div></div>`; })();
     const checksHtml = p.scalp ? `<div class="plcard checks"><div class="plh"><b>Confirmation checks ${p.passed}/9</b><span class="muted sm">★ = must pass</span></div>${p.checks.map(c => `<div class="chk ${c.ok ? 'ok' : 'no'}"><span>${c.ok ? '✓' : '✗'}</span><b>${c.name}${c.key ? ' ★' : ''}</b><span class="muted sm">${c.text}</span></div>`).join('')}</div>` : '';
-    const planCard = (q, main) => { const qty = q.risk ? o.acct * o.risk / 100 / q.risk : 0; return `<div class="plcard ${main ? (q.dir > 0 ? 'long' : 'short') : 'alt'}"><div class="plh"><b>${main ? 'Next plan' : 'If it turns'}: ${q.dir > 0 ? 'LONG' : 'SHORT'}</b><span class="muted sm">${main ? (q.eType === 'limit' ? 'limit order' : 'at market') : 'not active'}</span></div>
+    const ranks = pl ? null : rankIdeas(p), rk = q => ranks && ranks.find(r => r.q === q);
+    const planCard = (q, main) => {
+      const qty = q.risk ? o.acct * o.risk / 100 / q.risk : 0, r = rk(q), pr = q.dir > 0 ? p.probL : p.probS;
+      const badge = r ? (r.best ? `<span class="best">⭐ MORE LIKELY</span>` : `<span class="muted sm">less likely</span>`) : `<span class="muted sm">${main ? (q.eType === 'limit' ? 'limit order' : 'at market') : 'not active'}</span>`;
+      return `<div class="plcard ${main ? (q.dir > 0 ? 'long' : 'short') : r && r.best ? (q.dir > 0 ? 'long' : 'short') + ' idea' : 'alt'}"><div class="plh"><b>${main ? 'Next plan' : 'If it turns'}: ${q.dir > 0 ? 'LONG' : 'SHORT'}</b>${badge}</div>
+      ${r ? `<div class="trig">Starts only after a ${p.trigTf} candle <b>closes ${q.dir > 0 ? 'above' : 'below'} ${fmt(q.trigger)}</b> <span class="muted">(${r.trig.toFixed(2)}% away)</span><div class="muted sm">${r.why.join(' · ')}</div></div>` : ''}
       <div class="plrow"><span>Entry</span><b class="mono">${fmt(q.entry)}</b><span class="muted sm">${pct(q.entry)}${q.base ? ' · ' + q.base.src.slice(0, 2).join(', ') : ''}</span></div>
       <div class="plrow"><span class="r">Stop loss</span><b class="mono r">${fmt(q.stop)}</b><span class="muted sm">risk ${fmt(q.risk)}</span></div>
       <div class="plrow"><span class="g">TP1</span><b class="mono g">${fmt(q.tp1)}</b><span class="muted sm">${q.rr1.toFixed(1)}R — half off, stop to entry</span></div>
       <div class="plrow"><span class="g">TP2</span><b class="mono g">${fmt(q.tp2)}</b><span class="muted sm">${q.rr2.toFixed(1)}R</span></div>
-      ${main ? `<div class="plrow"><span>Size</span><b class="mono">${qty < 1 ? qty.toFixed(4) : qty.toFixed(3)} ${S.info.base}</b><span class="muted sm">loses ${OF.fmtUsd(o.acct * o.risk / 100)} at the stop</span></div><button class="trackbtn">✔ Track this plan (I am taking it)</button>` : ''}</div>`; };
+      ${!main && pr && pr.decided ? `<div class="plrow"><span>Win %</span><b class="mono ${pr.win - pr.be >= 0.05 ? 'g' : pr.win >= pr.be ? 'y' : 'r'}">${Math.round(pr.win * 100)}%</b><span class="muted sm">needs ${Math.round(pr.be * 100)}% · ${pr.decided} past setups</span></div>` : ''}
+      ${main ? `<div class="plrow"><span>Size</span><b class="mono">${qty < 1 ? qty.toFixed(4) : qty.toFixed(3)} ${S.info.base}</b><span class="muted sm">loses ${OF.fmtUsd(o.acct * o.risk / 100)} at the stop</span></div><button class="trackbtn">✔ Track this plan (I am taking it)</button>`
+        : `<button class="trackany" data-d="${q.dir}">Track anyway — not confirmed (${qty < 1 ? qty.toFixed(4) : qty.toFixed(3)} ${S.info.base})</button>`}</div>`; };
     main.innerHTML = pre + `<div class="plstatus ${cls}"><span class="pli">${icon}</span><div><div class="plsh">${head}</div><div class="plsb">${body}</div></div></div>
       <div class="plcards">${probHtml}${checksHtml}</div><div class="plcards">${pl ? planCard(pl, true) + planCard(pl.dir > 0 ? p.short : p.long, false) : planCard(p.long, false) + planCard(p.short, false)}</div>`;
     const g = main.querySelector('.goopen'); if (g) g.onclick = e => { e.preventDefault(); this.o.sub = 'open'; this.save(); this.html(); };
     const tb = main.querySelector('.trackbtn');
     if (tb) tb.onclick = () => { this.T.push(newTrade(o, S.symbol, o.mode, Object.assign({}, pl, { conf: p.conf, prob: p.prob }))); this.saveT(); this.o.sub = 'open'; this.save(); this.html(); };
+    main.querySelectorAll('.trackany').forEach(b => b.onclick = () => {
+      const q = +b.dataset.d > 0 ? p.long : p.short, t = newTrade(o, S.symbol, o.mode, Object.assign({}, q, { prob: q.dir > 0 ? p.probL : p.probS }));
+      t.events.push([OF.now(), 'Tracked by you WITHOUT confirmation']); t.unconfirmed = true; this.T.push(t); this.saveT(); this.o.sub = 'open'; this.save(); this.html();
+    });
     const zl = z => `<div class="zr"><b class="mono">${fmt(z.p)}</b><span class="zw" style="width:${Math.min(60, z.w * 9)}px"></span><span class="muted sm">${z.src.join(' · ')}</span></div>`;
     side.innerHTML = `<div class="sh">Resistance above</div>${p.res.slice(0, 7).map(zl).join('') || '<div class="muted pad">none</div>'}<div class="zr now"><b class="mono">${fmt(p.px)}</b><span class="muted sm">price now</span></div><div class="sh">Support below</div>${p.sup.slice(0, 7).map(zl).join('') || '<div class="muted pad">none</div>'}`;
     const groups = [...new Set(p.factors.map(f => f.group))];
@@ -531,7 +546,8 @@ OF.views.plan = {
     this.pw = pw;
     const n = Math.min(this.zv.n, k.length), end = Math.max(n, k.length - this.zv.off), i0 = Math.max(0, end - n);
     const bw = pw / (n + Math.max(6, n * 0.18)), X = i => (i - i0 + 0.5) * bw; this.bw = bw;
-    const nxt = this.o.sub !== 'open' ? p.plan : null, lv = [];
+    const nxt = this.o.sub !== 'open' ? p.plan : null, lv = [], ideas = this.o.sub === 'next' && !p.plan ? rankIdeas(p) : [];
+    ideas.forEach(r => lv.push(r.q.entry, r.q.stop, r.q.tp1));
     open.forEach(L => lv.push(L.entry, L.stopNow, L.tp1, L.tp2)); if (nxt) lv.push(nxt.entry, nxt.stop, nxt.tp1, nxt.tp2);
     let lo = Infinity, hi = -Infinity; for (let i = i0; i < end; i++) { lo = Math.min(lo, k[i].l); hi = Math.max(hi, k[i].h); }
     // include trade levels only if they are reasonably close; far ones become edge arrows (they used to flatten the candles)
@@ -579,6 +595,18 @@ OF.views.plan = {
     ctx.font = '11px ui-monospace,monospace'; ctx.textAlign = 'right';
     offUp.forEach(([t, col], i) => { ctx.textBaseline = 'top'; ctx.fillStyle = 'rgba(10,13,18,.8)'; ctx.fillRect(pw - ctx.measureText(t).width - 10, 22 + i * 14, ctx.measureText(t).width + 8, 13); ctx.fillStyle = col; ctx.fillText(t, pw - 6, 22 + i * 14); });
     offDn.forEach(([t, col], i) => { ctx.textBaseline = 'bottom'; ctx.fillStyle = 'rgba(10,13,18,.8)'; ctx.fillRect(pw - ctx.measureText(t).width - 10, ph - 8 - (i + 1) * 14, ctx.measureText(t).width + 8, 13); ctx.fillStyle = col; ctx.fillText(t, pw - 6, ph - 8 - i * 14); });
+    // both conditional ideas (no confirmed plan): the more likely one bold, the other faint
+    ideas.slice().reverse().forEach(r => {
+      const q = r.q, a = r.best ? 1 : 0.45, nm = (r.best ? '⭐ ' : '') + 'IF ' + (q.dir > 0 ? 'LONG' : 'SHORT'), x0 = X(end - 1) + bw * 0.6, lx = Math.min(x0, pw - 250) - (r.best ? 0 : 0);
+      ctx.save(); ctx.globalAlpha = a;
+      ctx.fillStyle = 'rgba(239,68,68,.12)'; ctx.fillRect(x0, Math.min(Y(q.entry), Y(q.stop)), pw - x0, Math.abs(Y(q.stop) - Y(q.entry)));
+      ctx.fillStyle = 'rgba(34,197,94,.12)'; ctx.fillRect(x0, Math.min(Y(q.entry), Y(q.tp1)), pw - x0, Math.abs(Y(q.tp1) - Y(q.entry)));
+      ui.hline(ctx, 0, pw, Y(q.trigger), q.dir > 0 ? '#86efac' : '#fca5a5', [2, 2], `${nm} trigger: ${p.trigTf} close ${q.dir > 0 ? 'above' : 'below'} ${OF.fp(q.trigger)}`, 6);
+      ui.hline(ctx, x0, pw, Y(q.entry), '#e5e7eb', [6, 3], `${nm} entry ${OF.fp(q.entry)}`, lx);
+      ui.hline(ctx, x0, pw, Y(q.stop), C.sell, [6, 3], `${nm} stop ${OF.fp(q.stop)}`, lx);
+      ui.hline(ctx, x0, pw, Y(q.tp1), C.buy, [6, 3], `${nm} TP1 ${OF.fp(q.tp1)}`, lx);
+      ctx.restore();
+    });
     OF.drawKeyLevels(ctx, 0, pw, Y, lo, hi);
     if (S.last) { ui.hline(ctx, 0, pw, Y(S.last), 'rgba(229,231,235,.5)', [1, 3]); ui.tag(ctx, pw + 1, Y(S.last), OF.fp(S.last), '#e5e7eb', '#000'); }
     ctx.font = '11px ui-monospace,monospace'; ctx.fillStyle = C.muted; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
@@ -587,6 +615,21 @@ OF.views.plan = {
     ui.cross(ctx, this.mouse, 0, pw, 6, ph - 12, lo, hi, pw + 1, x => k[i0].t + (x / bw) * ms);
   }
 };
+/* Which of the two "if it turns" ideas matters more right now: analysis lean, distance to its trigger, measured edge, reward. */
+function rankIdeas(p) {
+  const px = p.px, out = [p.long, p.short].map(q => {
+    const pr = q.dir > 0 ? p.probL : p.probS, lean = p.bias * q.dir, trig = Math.abs(q.trigger - px) / px * 100, ent = Math.abs(q.entry - px) / p.atr;
+    const edge = pr && pr.decided >= 10 ? pr.win - pr.be : 0;
+    const score = 0.45 * OF.clamp(lean / 0.4, -1, 1) + 0.25 * OF.clamp(edge / 0.1, -1, 1) + 0.2 * (1 - OF.clamp(ent / 1.5, 0, 1)) + 0.1 * OF.clamp((q.rr1 - 1) / 2, 0, 1);
+    const why = [lean > 0.1 ? `analysis leans ${q.dir > 0 ? 'up' : 'down'} (${Math.round(p.bias * 100)})` : lean < -0.1 ? `analysis leans the other way (${Math.round(p.bias * 100)})` : 'analysis is neutral',
+      `trigger ${trig.toFixed(2)}% away`, pr && pr.decided ? `measured win ${Math.round(pr.win * 100)}% vs ${Math.round(pr.be * 100)}% needed` : 'no history yet'];
+    return { q, pr, score, trig, why };
+  });
+  out.sort((a, b) => b.score - a.score);
+  out[0].best = true;
+  out.bothBad = out.every(r => r.pr && r.pr.decided >= 10 && r.pr.win < r.pr.be);
+  return out;
+}
 function addForm(o) {
   const px = OF.S.last || 0, fp = v => v ? v.toFixed(OF.S.info.dp) : '';
   return `<details class="addf"><summary>➕ Add a trade I already have (e.g. yesterday’s plan)</summary>

@@ -283,3 +283,7 @@ body.hide-brand .brandbar,body.hide-mtf #mtf,body.hide-kr #keyread,body.hide-rea
 .addrow label{font-size:12px;color:var(--muted);display:flex;gap:4px;align-items:center}
 .trackbtn{margin-top:8px;width:100%;padding:7px;border-radius:7px;background:var(--buy);color:#000;font-weight:700}
 .hdel{color:var(--muted)}
+.best{background:var(--amber);color:#000;font-weight:800;font-size:11px;padding:2px 8px;border-radius:5px}
+.plcard.idea{box-shadow:inset 3px 0 0 var(--amber);border-color:rgba(245,158,11,.6)}
+.trig{font-size:12px;background:rgba(255,255,255,.04);border-radius:6px;padding:5px 8px;margin-bottom:6px}
+.trackany{margin-top:8px;width:100%;padding:5px;border-radius:7px;border:1px dashed var(--line);color:#cbd5e1;font-size:12px}.trackany:hover{background:var(--panel2)}
