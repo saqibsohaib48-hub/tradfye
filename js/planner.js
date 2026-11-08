@@ -270,60 +270,99 @@ OF.swingPlan = function () {
 };
 
 /* ===================== TRADE PLAN TAB =====================
-   A plan is LOCKED when created so its levels do not move every refresh. It is then tracked tick by tick:
-   waiting → active (entry touched) → tp1 (half off, stop to entry) → done / breakeven, or stopped,
-   missed (target reached before entry), expired (not filled in 4 h). The analysis below keeps updating. */
-const FINAL = { stopped: 1, done: 1, breakeven: 1, missed: 1, expired: 1 };
-function lockPlan(p, symbol, expMs, expLabel) {
-  const pl = p.plan;
-  return { symbol, created: OF.now(), dir: pl.dir, entry: pl.entry, stop: pl.stop, stopNow: pl.stop, tp1: pl.tp1, tp2: pl.tp2, rr1: pl.rr1, rr2: pl.rr2, risk: pl.risk, eType: pl.eType,
-    baseSrc: pl.base ? pl.base.src.slice(0, 2) : [], tp1Src: pl.tp1z ? pl.tp1z.src.slice(0, 2) : [], tp2Src: pl.tp2z ? pl.tp2z.src.slice(0, 2) : [],
-    state: pl.eType === 'market' ? 'active' : 'waiting', filledAt: pl.eType === 'market' ? OF.now() : null, events: [], lastT: OF.now(), expires: OF.now() + expMs, expLabel, conf: p.conf, prob: p.prob, scalp: !!p.scalp };
+   Three views:
+   • My trades  – every trade you track stays live (waiting → active → TP1 → done / stopped …) with P&L and a
+                  health check that re-tests it against the latest analysis: HOLD / TIGHTEN / CONSIDER CLOSING.
+   • Next plan  – the fresh setup for the chosen mode. It first checks your open trades for conflicts.
+                  "Track this plan" freezes its levels and adds it to My trades.
+   • History    – finished trades with result in R and $, win rate. Nothing is ever overwritten. */
+const FINAL = { stopped: 1, done: 1, breakeven: 1, missed: 1, expired: 1, closed: 1 };
+const MODES = { intraday: { name: 'Intraday 1h', exp: 4 * 36e5, expLabel: '4 h', stale: 12 * 36e5 }, swing: { name: 'Swing 1D', exp: 3 * 864e5, expLabel: '3 days', stale: 10 * 864e5 } };
+const dstr = t => new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ' ' + OF.hm(t);
+function newTrade(o, symbol, mode, src) {
+  const t = OF.now(), riskUsd = (o.acct || 0) * (o.risk || 0) / 100, risk = Math.abs(src.entry - src.stop);
+  return { id: t, symbol, mode, created: t, dir: src.dir, entry: src.entry, stop: src.stop, stopNow: src.stop, tp1: src.tp1, tp2: src.tp2 || src.tp1,
+    rr1: Math.abs(src.tp1 - src.entry) / risk, rr2: Math.abs((src.tp2 || src.tp1) - src.entry) / risk, risk, eType: src.eType || 'manual',
+    baseSrc: src.base ? src.base.src.slice(0, 2) : [], tp1Src: src.tp1z ? src.tp1z.src.slice(0, 2) : [], tp2Src: src.tp2z ? src.tp2z.src.slice(0, 2) : [],
+    state: src.eType === 'limit' ? 'waiting' : 'active', filledAt: src.eType === 'limit' ? null : t, events: [[t, src.eType === 'manual' ? 'Added by you (already open)' : src.eType === 'limit' ? 'Plan tracked — limit order placed' : 'Plan tracked — entered at market']],
+    lastT: t, expires: t + MODES[mode].exp, expLabel: MODES[mode].expLabel, conf: src.conf || null, prob: src.prob || null, riskUsd, qty: risk ? riskUsd / risk : 0 };
 }
 function step(L, price, t) {
   const d = L.dir, up = x => d > 0 ? price >= x : price <= x, down = x => d > 0 ? price <= x : price >= x;
   if (L.state === 'waiting') {
     if (down(L.entry)) { L.state = 'active'; L.filledAt = t; L.events.push([t, 'Entry filled at ' + OF.fp(L.entry)]); }
     else if (up(L.tp1)) { L.state = 'missed'; L.events.push([t, 'Price reached TP1 before the entry — missed, do not chase']); }
-    else if (t > L.expires) { L.state = 'expired'; L.events.push([t, 'Not filled within ' + (L.expLabel || '4 h') + ' — cancelled']); }
+    else if (t > L.expires) { L.state = 'expired'; L.events.push([t, 'Not filled within ' + L.expLabel + ' — cancelled']); }
   } else if (L.state === 'active') {
-    if (down(L.stopNow)) { L.state = 'stopped'; L.events.push([t, 'Stop hit at ' + OF.fp(L.stopNow) + ' (−1R)']); }
+    if (down(L.stopNow)) { L.state = 'stopped'; L.exitPx = L.stopNow; L.closedAt = t; L.events.push([t, 'Stop hit at ' + OF.fp(L.stopNow)]); }
     else if (up(L.tp1)) { L.state = 'tp1'; L.stopNow = L.entry; L.events.push([t, 'TP1 hit — half closed, stop moved to entry']); }
   } else if (L.state === 'tp1') {
-    if (up(L.tp2)) { L.state = 'done'; L.events.push([t, 'TP2 hit — trade complete']); }
-    else if (down(L.stopNow)) { L.state = 'breakeven'; L.events.push([t, 'Returned to entry after TP1 — rest closed at breakeven']); }
+    if (up(L.tp2)) { L.state = 'done'; L.closedAt = t; L.events.push([t, 'TP2 hit — trade complete']); }
+    else if (down(L.stopNow)) { L.state = 'breakeven'; L.closedAt = t; L.events.push([t, 'Back to entry after TP1 — rest closed at breakeven']); }
   }
 }
+function resultR(L, px) {
+  const open = (p) => (p - L.entry) * L.dir / L.risk;
+  switch (L.state) {
+    case 'stopped': return L.stopNow === L.stop ? -1 : 0;
+    case 'done': return (L.rr1 + L.rr2) / 2;
+    case 'breakeven': return L.rr1 / 2;
+    case 'missed': case 'expired': return 0;
+    case 'closed': return L.halfOff ? L.rr1 / 2 + open(L.exitPx) / 2 : open(L.exitPx);
+    case 'tp1': return L.rr1 / 2 + open(px) / 2;
+    case 'active': return open(px);
+    default: return 0;
+  }
+}
+function statusOf(L, px) {
+  const fp = OF.fp, dist = x => Math.abs(x / px - 1) * 100, side = L.dir > 0 ? 'BUY' : 'SELL', r = resultR(L, px);
+  const pnl = `<b class="${r >= 0 ? 'g' : 'r'}">${r >= 0 ? '+' : ''}${r.toFixed(2)}R${L.riskUsd ? ' (' + OF.fmtUsd(r * L.riskUsd, true) + ')' : ''}</b>`;
+  if (L.state === 'waiting') return { cls: 'wait', icon: '⏳', head: `WAITING — ${side} LIMIT at ${fp(L.entry)} not filled yet`, body: `Price ${fp(px)} is ${dist(L.entry).toFixed(2)}% ${px < L.entry ? 'below' : 'above'} the entry. Cancel at ${dstr(L.expires)} if not filled.` };
+  if (L.state === 'active') return { cls: r >= 0 ? 'on' : 'risk', icon: '🟢', head: `OPEN — ${side} from ${fp(L.entry)}${L.filledAt ? ' since ' + dstr(L.filledAt) : ''} · now ${pnl}`, body: `Stop ${fp(L.stopNow)} (${dist(L.stopNow).toFixed(2)}% away) · TP1 ${fp(L.tp1)} (${dist(L.tp1).toFixed(2)}% away) · TP2 ${fp(L.tp2)}` };
+  if (L.state === 'tp1') return { cls: 'on', icon: '✅', head: `TP1 HIT — half closed, stop at entry ${fp(L.entry)} · now ${pnl}`, body: `Runner is risk-free. TP2 ${fp(L.tp2)} is ${dist(L.tp2).toFixed(2)}% away.` };
+  const m = { stopped: ['❌', 'risk', 'STOPPED OUT'], done: ['🏁', 'on', 'COMPLETE — TP1 + TP2'], breakeven: ['➖', 'wait', 'CLOSED — TP1 + breakeven'], missed: ['↷', 'wait', 'MISSED — never filled'], expired: ['⌛', 'wait', 'EXPIRED — never filled'], closed: ['✋', r >= 0 ? 'on' : 'risk', 'CLOSED BY YOU at ' + fp(L.exitPx)] }[L.state];
+  return { cls: m[1], icon: m[0], head: `${m[2]} · ${pnl}`, body: '' };
+}
+
 OF.views.plan = {
-  label: 'Trade plan', title: 'Everything combined into one 1h intraday setup — entry, stop, targets, and live status',
-  o: (() => { const o = Object.assign({ acct: 1000, risk: 1, full: false, ctf: '1h', ctfS: '1d', mode: 'intraday' }, LS.get('plan', {})); if (o.mode === 'scalp') o.mode = 'swing'; if (!['4h', '1d'].includes(o.ctfS)) o.ctfS = '1d'; return o; })(),
-  zv: { n: 72, off: 0 },
+  label: 'Trade plan', title: 'My open trades with live health checks, the next plan, and history',
+  o: (() => { const o = Object.assign({ acct: 1000, risk: 1, full: false, ctf: '1h', ctfS: '1d', mode: 'intraday', sub: 'next' }, LS.get('plan', {})); if (o.mode === 'scalp') o.mode = 'swing'; if (!['4h', '1d'].includes(o.ctfS)) o.ctfS = '1d'; return o; })(),
+  zv: { n: 72, off: 0 }, an: {},
   save() { LS.set('plan', this.o); },
+  isScalp() { return this.o.mode === 'swing'; },
+  gen(mode) { return (mode || this.o.mode) === 'swing' ? OF.swingPlan() : OF.tradePlan(); },
+  analysis(mode) { const a = this.an[mode]; if (!a || a.wait || Date.now() - a.at > 15000) { this.an[mode] = this.gen(mode); this.an[mode].at = this.an[mode].at || Date.now(); } return this.an[mode]; },
+  // trade store (per symbol); migrates the old single-plan locks so yesterday's plan is not lost
+  load() {
+    const sym = OF.S.symbol, key = 'trades:' + sym; let a = LS.get(key, []);
+    for (const [k, mode] of [['lock:', 'intraday'], ['lockS:', 'swing'], ['lockD:', 'swing']]) {
+      const x = LS.get(k + sym, null);
+      if (x && !a.find(t => t.created === x.created)) { x.id = x.created; x.mode = mode; x.symbol = sym; x.riskUsd = x.riskUsd || 0; a.push(x); }
+      if (x) LS.set(k + sym, null);
+    }
+    this.T = a; this.saveT();
+  },
+  saveT() { LS.set('trades:' + OF.S.symbol, this.T.slice(-300)); },
+  openT() { return this.T.filter(t => !FINAL[t.state]); },
   toolbar(tb) {
     const o = this.o;
-    const inp = (lab, key, step) => { const w = el('div', 'grp'); w.appendChild(el('span', 'lbl', lab)); const i = el('input', 'num'); i.type = 'number'; i.step = step; i.value = o[key]; i.oninput = () => { o[key] = +i.value || 0; this.save(); this.html(); }; w.appendChild(i); return w; };
+    const inp = (lab, key, st) => { const w = el('div', 'grp'); w.appendChild(el('span', 'lbl', lab)); const i = el('input', 'num'); i.type = 'number'; i.step = st; i.value = o[key]; i.oninput = () => { o[key] = +i.value || 0; this.save(); this.html(); }; w.appendChild(i); return w; };
+    this.subSeg = el('span'); tb.append(this.subSeg); this.renderSub();
     tb.append(ui.seg('Mode', [['intraday', 'Intraday 1h'], ['swing', '📅 Swing 1D']], o.mode, v => { o.mode = v; this.save(); OF.app.remount(); }));
     tb.append(inp('Account $', 'acct', 100), inp('Risk %', 'risk', 0.25));
-    const nb = el('button', 'tgl on', '✚ New plan'); nb.title = 'Discard the current plan and build a fresh one from the latest data'; nb.onclick = () => { this.unlock(); this.p = this.gen(); this.maybeLock(); this.html(); };
-    tb.append(nb);
-    if (o.mode === 'swing') tb.append(ui.seg('Chart', [['4h', '4h'], ['1d', '1D']], o.ctfS, v => { o.ctfS = v; this.save(); this.zv = { n: 90, off: 0 }; }));
+    if (o.mode === 'swing') tb.append(ui.seg('Chart', [['4h', '4h'], ['1d', '1D']], o.ctfS, v => { o.ctfS = v; this.save(); this.zv = { n: 72, off: 0 }; }));
     else tb.append(ui.seg('Chart', [['15m', '15m'], ['1h', '1h'], ['4h', '4h']], o.ctf, v => { o.ctf = v; this.save(); this.zv = { n: 72, off: 0 }; }));
-    tb.append(ui.toggle('⛶ Full chart', o.full, v => { o.full = v; this.save(); this.applyFull(); }, 'Give the chart the whole page (status banner stays). Scroll = zoom, drag = pan, double-click = reset.'));
-    tb.append(el('span', 'lbl', 'Rule-based setup — a decision aid, not financial advice.'));
+    tb.append(ui.toggle('⛶ Full chart', o.full, v => { o.full = v; this.save(); this.applyFull(); }, 'Chart takes the page. Scroll = zoom, drag = pan, double-click = reset.'));
   },
-  isScalp() { return this.o.mode === 'swing'; },
-  key() { return (this.isScalp() ? 'lockD:' : 'lock:') + OF.S.symbol; },
-  gen() { return this.isScalp() ? OF.swingPlan() : OF.tradePlan(); },
-  unlock() { this.L = null; LS.set(this.key(), null); },
-  maybeLock() {
-    const p = this.p; if (!p || p.wait || !p.plan) return;
-    if (this.L && !FINAL[this.L.state]) return;
-    this.L = this.isScalp() ? lockPlan(p, OF.S.symbol, 3 * 864e5, '3 days') : lockPlan(p, OF.S.symbol, 4 * 36e5, '4 h'); LS.set(this.key(), this.L);
+  renderSub() {
+    if (!this.subSeg || !this.T) return;
+    const n = this.openT().length;
+    this.subSeg.innerHTML = ''; this.subSeg.appendChild(ui.seg('', [['open', `📂 My trades${n ? ' (' + n + ')' : ''}`], ['next', '✨ Next plan'], ['hist', '📜 History']], this.o.sub, v => { this.o.sub = v; this.save(); this.html(); }));
   },
   applyFull() { if (this.root) this.root.classList.toggle('plfull', !!this.o.full); this.c && this.c.fit(); },
   mount(v) {
     this.root = v; v.classList.add('scroll');
-    v.innerHTML = '<div id="plStatus"></div><div id="plTop"></div><div class="plgrid"><div class="gbox plchart" id="plChart"></div><div id="plSide"></div></div><div id="plFactors"></div>';
+    v.innerHTML = '<div id="plMain"></div><div class="plgrid"><div class="gbox plchart" id="plChart"></div><div id="plSide"></div></div><div id="plFactors"></div>';
     this.c = ui.canvas(document.getElementById('plChart')); ui.track(this);
     const cv = this.c.cv; let drag = null;
     cv.onwheel = e => { e.preventDefault(); this.zv.n = OF.clamp(Math.round(this.zv.n * (e.deltaY > 0 ? 1.15 : 0.87)), 15, 600); };
@@ -331,129 +370,156 @@ OF.views.plan = {
     window.addEventListener('mouseup', () => drag = null);
     cv.addEventListener('mousemove', e => { if (drag && this.bw) this.zv.off = Math.max(0, drag.off + Math.round((e.clientX - drag.x) / this.bw)); });
     cv.ondblclick = () => { this.zv = { n: 72, off: 0 }; };
-    const saved = LS.get(this.key(), null);
-    this.L = saved && saved.symbol === OF.S.symbol ? saved : null;
-    this.p = null; this.applyFull();
+    this.load(); this.renderSub(); this.applyFull(); this.lastHtml = 0;
   },
-  track() {
-    const L = this.L, S = OF.S; if (!L || FINAL[L.state]) return;
-    const tr = S.trades, first = tr.length ? tr[0].t : OF.now(), kh = S.k['1h'];
-    // catch up on hours the page was closed: replay 1h candles (worst-case extreme first)
-    if (kh && L.lastT < first - 36e5) {
-      for (const c of kh) {
-        if (c.t + 36e5 <= L.lastT || c.t >= first) continue;
-        const adverse = L.dir > 0 ? c.l : c.h, favour = L.dir > 0 ? c.h : c.l;
-        step(L, adverse, c.t + 36e5 - 1); if (FINAL[L.state]) break; step(L, favour, c.t + 36e5 - 1); if (FINAL[L.state]) break;
+  /* follow every open trade through the trades (and 1h candles for time the page was closed) */
+  trackAll() {
+    const S = OF.S, tr = S.trades, first = tr.length ? tr[0].t : OF.now(), kh = S.k['1h']; let changed = false;
+    for (const L of this.openT()) {
+      const before = L.state;
+      if (kh && L.lastT < first - 36e5) {
+        for (const c of kh) { if (c.t + 36e5 <= L.lastT || c.t >= first) continue; step(L, L.dir > 0 ? c.l : c.h, c.t + 36e5 - 1); if (FINAL[L.state]) break; step(L, L.dir > 0 ? c.h : c.l, c.t + 36e5 - 1); if (FINAL[L.state]) break; }
+        L.lastT = Math.max(L.lastT, first - 1);
       }
-      L.lastT = Math.max(L.lastT, first - 1);
+      for (let i = OF.lb(tr, L.lastT + 1); i < tr.length && !FINAL[L.state]; i++) step(L, tr[i].p, tr[i].t);
+      if (!FINAL[L.state] && L.state === 'waiting' && OF.now() > L.expires) step(L, S.last, OF.now());
+      L.lastT = tr.length ? tr[tr.length - 1].t : OF.now();
+      if (L.state !== before) changed = true;
     }
-    for (let i = OF.lb(tr, L.lastT + 1); i < tr.length; i++) { step(L, tr[i].p, tr[i].t); if (FINAL[L.state]) break; }
-    if (!FINAL[L.state] && L.state === 'waiting' && OF.now() > L.expires) step(L, S.last, OF.now());
-    L.lastT = tr.length ? tr[tr.length - 1].t : OF.now();
-    LS.set(this.key(), L);
+    if (changed || !this._sv || Date.now() - this._sv > 10000) { this.saveT(); this._sv = Date.now(); }
+    if (changed) { this.renderSub(); this.lastHtml = 0; }
   },
-  reading() {
-    const p = this.p; if (!p || p.wait) return 'Collecting data for the plan…';
-    if (p.scalp) return `Swing engine (daily): bias <b class="${p.bias > 0 ? 'g' : 'r'}">${p.bias > 0 ? 'bullish' : 'bearish'} ${Math.abs(p.bias * 100).toFixed(0)}</b> · <b>${p.passed}/9</b> confirmation checks pass · daily ATR ${OF.fp(p.atr)} · re-checked every 15 s; a confirmed swing is locked and tracked (cancelled if not filled within 3 days). Hold time: days, not hours.`;
-    return `Live analysis: bias <b class="${p.bias > 0 ? 'g' : 'r'}">${p.bias > 0 ? 'bullish' : 'bearish'} ${Math.abs(p.bias * 100).toFixed(0)}</b> · ${Math.round(p.agree * 100)}% of factors agree · 1h ATR ${OF.fp(p.atr)} · ${p.zones.length} price zones. Updates every 15 s; a locked plan keeps its levels.`;
-  },
-  status() {
-    const L = this.L, p = this.p, S = OF.S, box = document.getElementById('plStatus'); if (!box) return;
-    if (!p || p.wait) { box.innerHTML = ''; return; }
-    const px = S.last, fp = OF.fp, hm = OF.hm, dist = x => Math.abs(x / px - 1) * 100;
-    const pnlR = L ? (px - L.entry) * L.dir / L.risk : 0;
-    let cls = 'wait', icon = '⏳', head = '', body = '';
-    if (!L) {
-      if (p.scalp) {
-        head = `NO CONFIRMED SWING — ${p.passed}/9 checks pass`;
-        body = `Do nothing yet. Missing: ${p.checks.filter(c => !c.ok).map(c => c.name).join(' · ')}. It re-checks every 15 s and locks a swing the moment 7/9 pass (including the three ★ checks).`;
-      } else {
-      head = 'NO TRADE — waiting for a trigger';
-      body = `No plan is active. Watch for a 1h candle to <b>close above ${fp(p.long.trigger)}</b> (long idea) or <b>below ${fp(p.short.trigger)}</b> (short idea). Do nothing until then.`;
-      }
-    } else {
-      const side = L.dir > 0 ? 'BUY' : 'SELL', live = p.plan ? p.side : 0;
-      const flip = live && live !== L.dir ? `<div class="y">⚠ Live analysis now points ${live > 0 ? 'LONG' : 'SHORT'} — consider cancelling this plan (✚ New plan).</div>` : '';
-      if (L.state === 'waiting') {
-        icon = '⏳'; cls = 'wait';
-        head = `WAITING — not active yet. Place a ${side} LIMIT at ${fp(L.entry)}`;
-        body = `Price ${fp(px)} is <b>${dist(L.entry).toFixed(2)}% ${px < L.entry ? 'below' : 'above'}</b> the entry. The trade only starts if price comes to ${fp(L.entry)}. Stop ${fp(L.stop)} · TP1 ${fp(L.tp1)} · TP2 ${fp(L.tp2)}. Cancel at ${L.expires - Date.now() > 864e5 ? new Date(L.expires).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ' ' : ''}${hm(L.expires)} if not filled.` + flip;
-      } else if (L.state === 'active') {
-        icon = '🟢'; cls = pnlR >= 0 ? 'on' : 'risk';
-        head = `ACTIVE — ${side} filled at ${fp(L.entry)}${L.filledAt ? ' (' + hm(L.filledAt) + ')' : ''}`;
-        body = `Now <b class="${pnlR >= 0 ? 'g' : 'r'}">${pnlR >= 0 ? '+' : ''}${pnlR.toFixed(2)}R</b>. Stop ${fp(L.stopNow)} (${dist(L.stopNow).toFixed(2)}% away) · TP1 ${fp(L.tp1)} (${dist(L.tp1).toFixed(2)}% away). Keep the stop where it is.` + flip;
-      } else if (L.state === 'tp1') {
-        icon = '✅'; cls = 'on';
-        head = `TP1 HIT — half closed, stop moved to entry ${fp(L.entry)}`;
-        body = `Remaining half is risk-free. Next target TP2 ${fp(L.tp2)} (${dist(L.tp2).toFixed(2)}% away). Now ${pnlR >= 0 ? '+' : ''}${pnlR.toFixed(2)}R on the runner.`;
-      } else {
-        const res = { stopped: ['❌', 'risk', 'STOPPED OUT (−1R)'], done: ['🏁', 'on', `COMPLETE — TP1 + TP2 (≈ +${((L.rr1 + L.rr2) / 2).toFixed(1)}R)`], breakeven: ['➖', 'wait', `CLOSED — half at TP1, half at entry (≈ +${(L.rr1 / 2).toFixed(1)}R)`], missed: ['↷', 'wait', 'MISSED — price left without filling the entry'], expired: ['⌛', 'wait', 'EXPIRED — entry not filled within 4 h'] }[L.state];
-        icon = res[0]; cls = res[1]; head = res[2] + ' · plan finished';
-        body = `Press <b>✚ New plan</b> for a fresh setup from the latest data${p.plan ? ` (it currently suggests a ${p.side > 0 ? 'LONG' : 'SHORT'})` : ' (right now it says NO TRADE)'}.`;
-      }
-      if (L.events.length) body += `<div class="plev">${L.events.slice(-4).map(e => `<span>${hm(e[0], true)} · ${e[1]}</span>`).join('')}</div>`;
+  /* re-test an open trade against the latest data */
+  health(L) {
+    const S = OF.S, px = S.last, p = this.analysis(L.mode), k = OF.keyRead(L.mode === 'swing' ? '4h' : '1h'), out = []; let sc = 0;
+    if (!p || p.wait) return { v: 'CHECKING', cls: 'wait', items: ['Loading analysis…'] };
+    const d = L.dir, r = resultR(L, px), word = d > 0 ? 'up' : 'down';
+    if (p.bias * d > 0.2) out.push(['ok', `Analysis still points ${word} (bias ${Math.round(p.bias * 100)}, ${Math.round(p.agree * 100)}% agree)`]);
+    else if (p.bias * d < -0.2 && p.agree >= 0.55) { out.push(['bad', `Analysis has FLIPPED against you (bias ${Math.round(p.bias * 100)}, ${Math.round(p.agree * 100)}% agree)`]); sc -= 2; }
+    else { out.push(['warn', `Analysis is neutral now (bias ${Math.round(p.bias * 100)})`]); sc -= 0.5; }
+    if (k) {
+      const t = k.trend === 'UP' ? 1 : k.trend === 'DOWN' ? -1 : 0;
+      if (t === d) out.push(['ok', `Trend (${k.tf}) is with you`]); else if (t === -d) { out.push(['bad', `Trend (${k.tf}) is against you`]); sc -= 1; } else out.push(['warn', `Trend (${k.tf}) is a range`]);
+      const ps = k.pside === 'BUYERS' ? 1 : k.pside === 'SELLERS' ? -1 : 0;
+      if (ps === -d) { out.push(['warn', `${k.pside.toLowerCase()} are pushing right now`]); sc -= 0.5; } else if (ps === d) out.push(['ok', `${k.pside.toLowerCase()} are pushing your way`]);
     }
-    box.innerHTML = `<div class="plstatus ${cls}"><span class="pli">${icon}</span><div><div class="plsh">${head}</div><div class="plsb">${body}</div></div></div>`;
+    if (L.state !== 'waiting') {
+      const prot = (d > 0 ? p.sup : p.res).find(z => d > 0 ? z.lo > L.stopNow && z.hi < px : z.hi < L.stopNow && z.lo > px && z.w >= 2);
+      if (prot) out.push(['ok', `${d > 0 ? 'Support' : 'Resistance'} at ${OF.fp(prot.p)} (${prot.src.slice(0, 2).join(', ')}) protects your stop`]);
+      else { out.push(['warn', `No strong ${d > 0 ? 'support' : 'resistance'} between price and your stop`]); sc -= 0.5; }
+      const tgt = L.state === 'tp1' ? L.tp2 : L.tp1;
+      const block = (d > 0 ? p.res : p.sup).find(z => z.w >= 2.5 && (d > 0 ? z.lo > px && z.lo < tgt : z.hi < px && z.hi > tgt));
+      if (block) { out.push(['warn', `Strong ${d > 0 ? 'resistance' : 'support'} at ${OF.fp(block.p)} before your target — price may stall there`]); sc -= 0.5; }
+      const age = OF.now() - (L.filledAt || L.created);
+      if (age > MODES[L.mode].stale) { out.push(['warn', `Open ${Math.round(age / 36e5)} h — longer than this kind of trade usually needs`]); sc -= 0.5; }
+    }
+    let v, cls, act;
+    if (L.state === 'waiting') {
+      if (sc <= -2) { v = '⛔ CANCEL THE ORDER'; cls = 'risk'; act = 'The setup no longer holds — cancel the limit order.'; }
+      else { v = '✅ KEEP THE ORDER'; cls = 'on'; act = 'Setup still valid — leave the limit order in place.'; }
+    } else if (sc <= -2.5) { v = '⛔ CONSIDER CLOSING'; cls = 'risk'; act = r > 0 ? 'Take the profit you have.' : 'The reason for the trade is gone — closing early usually costs less than waiting for the stop.'; }
+    else if (sc <= -1 || (r >= 1 && L.stopNow === L.stop && L.state === 'active')) { v = '⚠ TIGHTEN / TAKE PARTIAL'; cls = 'wait'; act = r >= 1 ? `You are +${r.toFixed(1)}R: move the stop to entry ${OF.fp(L.entry)} or take half off.` : 'Warnings are building — consider a smaller position or a tighter stop.'; }
+    else { v = '✅ HOLD'; cls = 'on'; act = 'Nothing has changed against the trade — keep the plan (stop and targets).'; }
+    return { v, cls, act, items: out };
   },
   html() {
-    const p = this.p, S = OF.S, L = this.L; if (!p) return;
-    const top = document.getElementById('plTop'), side = document.getElementById('plSide'), fac = document.getElementById('plFactors'); if (!top) return;
-    this.status();
-    if (p.wait) { top.innerHTML = '<div class="empty">' + p.wait + '</div>'; return; }
-    const o = this.o, fmt = OF.fp, pct = x => ((x / p.px - 1) * 100).toFixed(2) + '%';
-    const lockedCard = L => {
-      const qty = L.risk ? o.acct * o.risk / 100 / L.risk : 0, dirTxt = L.dir > 0 ? 'LONG' : 'SHORT';
-      return `<div class="plcard ${L.dir > 0 ? 'long' : 'short'}">
-        <div class="plh"><b>${dirTxt} ${L.scalp ? 'swing' : 'plan'} · locked ${new Date(L.created).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} ${OF.hm(L.created)}</b><span class="muted sm">${L.eType === 'limit' ? (L.dir > 0 ? 'buy' : 'sell') + ' limit order' : 'at market'} · ${L.scalp ? 'daily swing (days)' : '1h intraday'} · confidence ${L.conf}%</span></div>
-        <div class="plrow"><span>Entry</span><b class="mono">${fmt(L.entry)}</b><span class="muted sm">${L.baseSrc.length ? 'at ' + L.baseSrc.join(', ') : ''}</span></div>
-        <div class="plrow"><span class="r">Stop loss</span><b class="mono r">${fmt(L.stopNow)}</b><span class="muted sm">${L.stopNow === L.entry ? 'moved to entry after TP1' : 'risk ' + fmt(L.risk) + ' per ' + S.info.base}</span></div>
-        <div class="plrow"><span class="g">Take profit 1</span><b class="mono g">${fmt(L.tp1)}</b><span class="muted sm">${L.rr1.toFixed(1)}R${L.tp1Src.length ? ' · ' + L.tp1Src.join(', ') : ''} — close half, stop to entry</span></div>
-        <div class="plrow"><span class="g">Take profit 2</span><b class="mono g">${fmt(L.tp2)}</b><span class="muted sm">${L.rr2.toFixed(1)}R${L.tp2Src.length ? ' · ' + L.tp2Src.join(', ') : ''}</span></div>
-        <div class="plrow"><span>Size</span><b class="mono">${qty < 1 ? qty.toFixed(4) : qty.toFixed(3)} ${S.info.base}</b><span class="muted sm">${OF.fmtUsd(qty * L.entry)} notional · loses ${OF.fmtUsd(o.acct * o.risk / 100)} at the stop</span></div></div>`;
-    };
-    const condCard = pl => `<div class="plcard alt"><div class="plh"><b>Idea if it turns: ${pl.dir > 0 ? 'LONG' : 'SHORT'}</b><span class="muted sm">not active</span></div>
-        <div class="muted sm" style="margin-bottom:4px">${p.scalp ? `Locks automatically when the ${pl.dir > 0 ? 'buy' : 'sell'} checks reach 7/9.` : `Only after a 1h candle <b>closes ${pl.dir > 0 ? 'above' : 'below'} ${fmt(pl.trigger)}</b> and the bias turns ${pl.dir > 0 ? 'bullish' : 'bearish'} — then press ✚ New plan.`}</div>
-        <div class="plrow"><span>Entry area</span><b class="mono">${fmt(pl.entry)}</b><span class="muted sm">${pct(pl.entry)} from price</span></div>
-        <div class="plrow"><span class="r">Stop</span><b class="mono r">${fmt(pl.stop)}</b><span></span></div>
-        <div class="plrow"><span class="g">Targets</span><b class="mono g">${fmt(pl.tp1)}</b><span class="muted sm">then ${fmt(pl.tp2)} · ${pl.rr1.toFixed(1)}R / ${pl.rr2.toFixed(1)}R</span></div></div>`;
-    const pr = (L && L.prob) || p.prob;
-    const probHtml = !pr ? '<div class="plcard"><div class="plh"><b>Win probability</b></div><div class="muted sm">Measuring on past candles…</div></div>'
-      : !pr.decided ? `<div class="plcard"><div class="plh"><b>Win probability</b></div><div class="muted sm">No similar setups found in the ${pr.label}.</div></div>`
-      : (() => {
-        const w = Math.round(pr.win * 100), be = Math.round(pr.be * 100), edge = w - be, cls = edge >= 5 ? 'g' : edge >= 0 ? 'y' : 'r', low = pr.decided < 30;
-        return `<div class="plcard prob"><div class="plh"><b>Win probability (TP1 before stop)</b><span class="muted sm">measured, not guessed</span></div>
-          <div class="pbig ${cls}">${w}%</div>
-          <div class="pbar"><i style="width:${w}%"></i><b style="left:${be}%"></b></div>
-          <div class="muted sm">From <b>${pr.decided}</b> similar ${L ? (L.dir > 0 ? 'long' : 'short') : ''} setups in the ${pr.label}${low ? ' — <span class="y">small sample, treat with care</span>' : ''}.
-          Break-even needs <b>${be}%</b> at these targets → edge <b class="${cls}">${edge >= 0 ? '+' : ''}${edge}%</b>.
-          Reached TP2: ${Math.round(pr.w2 * 100)}% · average result ${pr.exp >= 0 ? '+' : ''}${pr.exp.toFixed(2)}R per setup.
-          Order-book checks can't be replayed (no book history), so this is the base rate before them.</div></div>`;
-      })();
+    const S = OF.S, main = document.getElementById('plMain'), side = document.getElementById('plSide'), fac = document.getElementById('plFactors'); if (!main) return;
+    this.lastHtml = Date.now(); this.renderSub();
+    const o = this.o, sub = o.sub, px = S.last, fp = OF.fp, p = this.analysis(o.mode), open = this.openT();
+    side.style.display = sub === 'next' ? '' : 'none'; fac.style.display = sub === 'next' ? '' : 'none';
+    const pill = s => `<span class="pill ${s > 0 ? 'b' : 's'}">${s > 0 ? 'LONG' : 'SHORT'}</span>`;
+    if (sub === 'open') {
+      const card = L => {
+        const st = statusOf(L, px), h = this.health(L);
+        return `<div class="trd ${st.cls}" data-id="${L.id}">
+          <div class="trh">${pill(L.dir)} <b>${L.symbol}</b> <span class="muted sm">${MODES[L.mode] ? MODES[L.mode].name : L.mode} · tracked ${dstr(L.created)}</span><span class="trb"><button data-a="close">✋ I closed it (at ${fp(px)})</button><button data-a="del" title="Remove from the list">🗑</button></span></div>
+          <div class="plstatus ${st.cls}"><span class="pli">${st.icon}</span><div><div class="plsh">${st.head}</div><div class="plsb">${st.body}</div></div></div>
+          <div class="trn mono"><span>Entry <b>${fp(L.entry)}</b></span><span class="r">Stop <b>${fp(L.stopNow)}</b>${L.stopNow !== L.stop ? ' (moved)' : ''}</span><span class="g">TP1 <b>${fp(L.tp1)}</b></span><span class="g">TP2 <b>${fp(L.tp2)}</b></span><span>Size <b>${L.qty ? (L.qty < 1 ? L.qty.toFixed(4) : L.qty.toFixed(3)) + ' ' + S.info.base : '—'}</b></span></div>
+          <div class="hl ${h.cls}"><div class="hlv">Health check: <b>${h.v}</b> — ${h.act || ''}</div>${h.items.map(([c, t]) => `<div class="hli ${c}">${c === 'ok' ? '✓' : c === 'bad' ? '✗' : '!'} ${t}</div>`).join('')}<div class="muted sm">Re-checked every 15 s against the latest ${MODES[L.mode] ? MODES[L.mode].name : ''} analysis and key points. Rules, not advice — you decide.</div></div>
+          ${L.events.length ? `<div class="plev">${L.events.slice(-4).map(e => `<span>${dstr(e[0])} · ${e[1]}</span>`).join('')}</div>` : ''}</div>`;
+      };
+      const fresh = this._lastSub !== 'open' || !main.querySelector('#plCards');
+      if (fresh) main.innerHTML = '<div id="plCards"></div>' + addForm(o);
+      const cardsBox = main.querySelector('#plCards');
+      cardsBox.innerHTML = open.length ? open.map(card).join('') : '<div class="empty">No open trades tracked. Use <b>✨ Next plan → Track this plan</b>, or add a trade you already have below.</div>';
+      this._lastSub = 'open';
+      cardsBox.querySelectorAll('.trd').forEach(div => {
+        const L = this.T.find(t => String(t.id) === div.dataset.id);
+        div.querySelector('[data-a=close]').onclick = () => { if (L.state === 'tp1') L.halfOff = true; L.state = 'closed'; L.exitPx = S.last; L.closedAt = OF.now(); L.events.push([OF.now(), 'Closed by you at ' + OF.fp(S.last)]); this.saveT(); this.html(); };
+        div.querySelector('[data-a=del]').onclick = () => { this.T = this.T.filter(t => t !== L); this.saveT(); this.html(); };
+      });
+      const f = main.querySelector('.addf');
+      if (fresh) f.querySelector('button').onclick = () => {
+        const g = n => +f.querySelector(`[name=${n}]`).value, dir = f.querySelector('[name=dir]').value === 'long' ? 1 : -1;
+        const src = { dir, entry: g('entry'), stop: g('stop'), tp1: g('tp1'), tp2: g('tp2') || g('tp1'), eType: 'manual' };
+        if (!(src.entry > 0 && src.stop > 0 && src.tp1 > 0) || (src.entry - src.stop) * dir <= 0 || (src.tp1 - src.entry) * dir <= 0) { f.querySelector('.err').textContent = 'Check the numbers: for a long, stop below entry and TP above; for a short, the opposite.'; return; }
+        this.T.push(newTrade(o, S.symbol, f.querySelector('[name=mode]').value, src)); this.saveT(); f.open = false; this.html();
+      };
+    } else if (sub === 'hist') {
+      this._lastSub = 'hist';
+      const done = this.T.filter(t => FINAL[t.state]).sort((a, b) => (b.closedAt || b.created) - (a.closedAt || a.created));
+      const traded = done.filter(t => !['missed', 'expired'].includes(t.state)), rs = traded.map(t => resultR(t, px));
+      const wins = rs.filter(r => r > 0).length, tot = rs.reduce((a, r) => a + r, 0), usd = traded.reduce((a, t) => a + resultR(t, px) * (t.riskUsd || 0), 0);
+      main.innerHTML = `<div class="cards"><div class="card sm"><div class="ct">Finished trades</div><div class="cv">${traded.length}</div></div><div class="card sm"><div class="ct">Win rate</div><div class="cv">${traded.length ? Math.round(wins / traded.length * 100) + '%' : '—'}</div></div><div class="card sm"><div class="ct">Total</div><div class="cv ${tot >= 0 ? 'g' : 'r'}">${tot >= 0 ? '+' : ''}${tot.toFixed(2)}R</div></div><div class="card sm"><div class="ct">Total $</div><div class="cv ${usd >= 0 ? 'g' : 'r'}">${OF.fmtUsd(usd, true)}</div></div><div class="card sm"><div class="ct">Never filled</div><div class="cv">${done.length - traded.length}</div></div></div>
+        <table class="tbl"><thead><tr><th>Tracked</th><th>Mode</th><th>Side</th><th class="rt">Entry</th><th class="rt">Stop</th><th class="rt">TP1 / TP2</th><th>Result</th><th class="rt">R</th><th class="rt">$</th><th></th></tr></thead><tbody>${done.map(t => { const r = resultR(t, px); return `<tr><td class="mono">${dstr(t.created)}</td><td>${MODES[t.mode] ? MODES[t.mode].name : t.mode}</td><td>${pill(t.dir)}</td><td class="rt mono">${fp(t.entry)}</td><td class="rt mono">${fp(t.stop)}</td><td class="rt mono">${fp(t.tp1)} / ${fp(t.tp2)}</td><td>${statusOf(t, px).icon} ${t.state}</td><td class="rt mono ${r >= 0 ? 'g' : 'r'}">${r >= 0 ? '+' : ''}${r.toFixed(2)}</td><td class="rt mono">${t.riskUsd ? OF.fmtUsd(r * t.riskUsd, true) : '—'}</td><td><button class="hdel" data-id="${t.id}" title="Remove">🗑</button></td></tr>`; }).join('') || '<tr><td colspan="10" class="empty">No finished trades yet.</td></tr>'}</tbody></table>`;
+      main.querySelectorAll('.hdel').forEach(b => b.onclick = () => { this.T = this.T.filter(t => String(t.id) !== b.dataset.id); this.saveT(); this.html(); });
+    } else { this._lastSub = 'next'; this.htmlNext(main, side, fac, p, open); }
+  },
+  htmlNext(main, side, fac, p, open) {
+    const S = OF.S, o = this.o, fmt = OF.fp, pct = x => ((x / p.px - 1) * 100).toFixed(2) + '%';
+    if (!p || p.wait) { main.innerHTML = '<div class="empty">' + (p ? p.wait : 'Loading…') + '</div>'; side.innerHTML = ''; fac.innerHTML = ''; return; }
+    // 1) re-check open trades first
+    let pre = '';
+    if (open.length) {
+      const hs = open.map(L => [L, this.health(L)]), bad = hs.filter(([, h]) => /CLOS|CANCEL/.test(h.v)).length, same = p.plan ? open.filter(L => L.dir === p.side).length : 0, opp = p.plan ? open.filter(L => L.dir !== p.side).length : 0;
+      pre = `<div class="plstatus ${bad ? 'risk' : 'wait'}"><span class="pli">📂</span><div><div class="plsh">You have ${open.length} open trade${open.length > 1 ? 's' : ''} — check ${open.length > 1 ? 'them' : 'it'} first</div><div class="plsb">${hs.map(([L, h]) => `${L.dir > 0 ? 'LONG' : 'SHORT'} from ${fmt(L.entry)} → <b>${h.v}</b>`).join(' · ')}.
+        ${p.plan ? (opp ? ' <b class="r">This new plan points the OTHER way</b> — sort out the open trade before taking it.' : same ? ' This new plan is the same direction — taking it doubles your risk on one idea.' : '') : ''} <a href="#" class="goopen">Open My trades →</a></div></div></div>`;
+    }
+    // 2) the next plan
+    const pl = p.plan;
+    let head, body, cls = 'wait', icon = '⏳';
+    if (pl) { cls = 'on'; icon = '✨'; head = `NEXT PLAN: ${pl.dir > 0 ? 'LONG' : 'SHORT'} ${pl.eType === 'limit' ? 'limit at ' + fmt(pl.entry) : 'at market ' + fmt(pl.entry)}`; body = `Stop ${fmt(pl.stop)} · TP1 ${fmt(pl.tp1)} (${pl.rr1.toFixed(1)}R) · TP2 ${fmt(pl.tp2)} (${pl.rr2.toFixed(1)}R). Levels keep updating until you press <b>Track this plan</b>, which freezes them and adds the trade to My trades.`; }
+    else if (p.scalp) { head = `NO CONFIRMED SWING — ${p.passed}/9 checks pass`; body = `Missing: ${p.checks.filter(c => !c.ok).map(c => c.name).join(' · ')}. Do nothing yet.`; }
+    else { head = 'NO TRADE right now'; body = `${p.why.join('; ')}. Watch for a 1h close above <b>${fmt(p.long.trigger)}</b> (long idea) or below <b>${fmt(p.short.trigger)}</b> (short idea).`; }
+    const pr = p.prob;
+    const probHtml = !pr ? '' : !pr.decided ? `<div class="plcard"><div class="plh"><b>Win probability</b></div><div class="muted sm">No similar setups found in the ${pr.label}.</div></div>` : (() => {
+      const w = Math.round(pr.win * 100), be = Math.round(pr.be * 100), edge = w - be, c = edge >= 5 ? 'g' : edge >= 0 ? 'y' : 'r';
+      return `<div class="plcard prob"><div class="plh"><b>Win probability (TP1 before stop)</b><span class="muted sm">measured, not guessed</span></div><div class="pbig ${c}">${w}%</div><div class="pbar"><i style="width:${w}%"></i><b style="left:${be}%"></b></div>
+        <div class="muted sm">From <b>${pr.decided}</b> similar setups in the ${pr.label}${pr.decided < 30 ? ' — <span class="y">small sample</span>' : ''}. Break-even needs <b>${be}%</b> → edge <b class="${c}">${edge >= 0 ? '+' : ''}${edge}%</b>. Average ${pr.exp >= 0 ? '+' : ''}${pr.exp.toFixed(2)}R per setup.</div></div>`; })();
     const checksHtml = p.scalp ? `<div class="plcard checks"><div class="plh"><b>Confirmation checks ${p.passed}/9</b><span class="muted sm">★ = must pass</span></div>${p.checks.map(c => `<div class="chk ${c.ok ? 'ok' : 'no'}"><span>${c.ok ? '✓' : '✗'}</span><b>${c.name}${c.key ? ' ★' : ''}</b><span class="muted sm">${c.text}</span></div>`).join('')}</div>` : '';
-    top.innerHTML = `<div class="plcards">${probHtml}${checksHtml}</div><div class="plcards">${L ? lockedCard(L) + condCard(L.dir > 0 ? p.short : p.long) : condCard(p.long) + condCard(p.short)}</div>`;
+    const planCard = (q, main) => { const qty = q.risk ? o.acct * o.risk / 100 / q.risk : 0; return `<div class="plcard ${main ? (q.dir > 0 ? 'long' : 'short') : 'alt'}"><div class="plh"><b>${main ? 'Next plan' : 'If it turns'}: ${q.dir > 0 ? 'LONG' : 'SHORT'}</b><span class="muted sm">${main ? (q.eType === 'limit' ? 'limit order' : 'at market') : 'not active'}</span></div>
+      <div class="plrow"><span>Entry</span><b class="mono">${fmt(q.entry)}</b><span class="muted sm">${pct(q.entry)}${q.base ? ' · ' + q.base.src.slice(0, 2).join(', ') : ''}</span></div>
+      <div class="plrow"><span class="r">Stop loss</span><b class="mono r">${fmt(q.stop)}</b><span class="muted sm">risk ${fmt(q.risk)}</span></div>
+      <div class="plrow"><span class="g">TP1</span><b class="mono g">${fmt(q.tp1)}</b><span class="muted sm">${q.rr1.toFixed(1)}R — half off, stop to entry</span></div>
+      <div class="plrow"><span class="g">TP2</span><b class="mono g">${fmt(q.tp2)}</b><span class="muted sm">${q.rr2.toFixed(1)}R</span></div>
+      ${main ? `<div class="plrow"><span>Size</span><b class="mono">${qty < 1 ? qty.toFixed(4) : qty.toFixed(3)} ${S.info.base}</b><span class="muted sm">loses ${OF.fmtUsd(o.acct * o.risk / 100)} at the stop</span></div><button class="trackbtn">✔ Track this plan (I am taking it)</button>` : ''}</div>`; };
+    main.innerHTML = pre + `<div class="plstatus ${cls}"><span class="pli">${icon}</span><div><div class="plsh">${head}</div><div class="plsb">${body}</div></div></div>
+      <div class="plcards">${probHtml}${checksHtml}</div><div class="plcards">${pl ? planCard(pl, true) + planCard(pl.dir > 0 ? p.short : p.long, false) : planCard(p.long, false) + planCard(p.short, false)}</div>`;
+    const g = main.querySelector('.goopen'); if (g) g.onclick = e => { e.preventDefault(); this.o.sub = 'open'; this.save(); this.html(); };
+    const tb = main.querySelector('.trackbtn');
+    if (tb) tb.onclick = () => { this.T.push(newTrade(o, S.symbol, o.mode, Object.assign({}, pl, { conf: p.conf, prob: p.prob }))); this.saveT(); this.o.sub = 'open'; this.save(); this.html(); };
     const zl = z => `<div class="zr"><b class="mono">${fmt(z.p)}</b><span class="zw" style="width:${Math.min(60, z.w * 9)}px"></span><span class="muted sm">${z.src.join(' · ')}</span></div>`;
-    side.innerHTML = `<div class="sh">Resistance above (nearest first)</div>${p.res.slice(0, 7).map(zl).join('') || '<div class="muted pad">none within 6%</div>'}
-      <div class="zr now"><b class="mono">${fmt(p.px)}</b><span class="muted sm">price now</span></div>
-      <div class="sh">Support below (nearest first)</div>${p.sup.slice(0, 7).map(zl).join('') || '<div class="muted pad">none within 6%</div>'}`;
+    side.innerHTML = `<div class="sh">Resistance above</div>${p.res.slice(0, 7).map(zl).join('') || '<div class="muted pad">none</div>'}<div class="zr now"><b class="mono">${fmt(p.px)}</b><span class="muted sm">price now</span></div><div class="sh">Support below</div>${p.sup.slice(0, 7).map(zl).join('') || '<div class="muted pad">none</div>'}`;
     const groups = [...new Set(p.factors.map(f => f.group))];
-    fac.innerHTML = '<h3>What the ' + (p.scalp ? 'swing engine' : 'analysis') + ' is based on (live)</h3><table class="tbl"><thead><tr><th>Factor</th><th>Weight</th><th>Vote</th><th>Reading</th></tr></thead><tbody>' +
-      groups.map(gp => p.factors.filter(f => f.group === gp).map(f => {
-        const v = f.s == null ? '—' : f.s > 0.15 ? '<b class="g">▲ long</b>' : f.s < -0.15 ? '<b class="r">▼ short</b>' : '<span class="muted">neutral</span>';
-        return `<tr><td>${f.name}</td><td class="mono muted">${f.w}</td><td>${v} <span class="mono muted sm">${f.s == null ? '' : (f.s * 100).toFixed(0)}</span></td><td class="wrap">${f.text}</td></tr>`;
-      }).join('')).join('') + '</tbody></table>';
+    fac.innerHTML = '<h3>What the analysis is based on (live)</h3><table class="tbl"><thead><tr><th>Factor</th><th>Weight</th><th>Vote</th><th>Reading</th></tr></thead><tbody>' + groups.map(gp => p.factors.filter(f => f.group === gp).map(f => { const v = f.s == null ? '—' : f.s > 0.15 ? '<b class="g">▲ long</b>' : f.s < -0.15 ? '<b class="r">▼ short</b>' : '<span class="muted">neutral</span>'; return `<tr><td>${f.name}</td><td class="mono muted">${f.w}</td><td>${v}</td><td class="wrap">${f.text}</td></tr>`; }).join('')).join('') + '</tbody></table>';
+  },
+  reading() {
+    const n = this.T ? this.openT().length : 0, p = this.an[this.o.mode];
+    return `📂 ${n} open trade${n === 1 ? '' : 's'} tracked (health re-checked every 15 s) · ✨ Next plan (${MODES[this.o.mode].name}): ${p && !p.wait ? (p.plan ? (p.side > 0 ? 'LONG' : 'SHORT') + ' setup ready' : 'no trade right now') : 'loading…'} · chart: solid lines = your open trades, dashed = next plan.`;
   },
   render() {
-    if (!this.p || Date.now() - this.p.at > 15000 || this.p.wait) { this.p = this.gen(); this.p.at = this.p.at || Date.now(); this.maybeLock(); this.html(); }
-    this.track();
-    if (!this._st || Date.now() - this._st > 1000) { this._st = Date.now(); this.status(); }
-    const p = this.p, c = this.c.fit(), ctx = c.ctx, W = c.w, H = c.h, S = OF.S, L = this.L;
+    if (!this.T) this.load();
+    this.trackAll();
+    if (Date.now() - this.lastHtml > (this.o.sub === 'next' ? 15000 : 3000)) this.html();
+    const p = this.analysis(this.o.mode), c = this.c.fit(), ctx = c.ctx, W = c.w, H = c.h, S = OF.S;
     ctx.fillStyle = C.bg; ctx.fillRect(0, 0, W, H);
     if (!p || p.wait) { ui.msg(ctx, W, H, p ? p.wait : 'Loading…'); return; }
     const tf = this.isScalp() ? this.o.ctfS : this.o.ctf, k = S.k[tf]; if (!k || !k.length) { OF.loadKlines(tf); ui.msg(ctx, W, H, 'Loading ' + tf + ' candles…'); return; }
-    const ms = OF.tfMs[tf], AX = 80, TB = 18, pw = W - AX, ph = H - TB;
+    const ms = OF.tfMs[tf], AX = 80, TB = 18, pw = W - AX, ph = H - TB, open = this.openT();
     const n = Math.min(this.zv.n, k.length), end = Math.max(n, k.length - this.zv.off), i0 = Math.max(0, end - n);
     const bw = pw / (n + Math.max(6, n * 0.18)), X = i => (i - i0 + 0.5) * bw; this.bw = bw;
-    const pl = L || (p.long.rr1 >= p.short.rr1 ? p.long : p.short), lv = L ? [L.entry, L.stopNow, L.stop, L.tp1, L.tp2] : [pl.entry, pl.stop, pl.tp1, pl.tp2];
+    const nxt = this.o.sub !== 'open' ? p.plan : null, lv = [];
+    open.forEach(L => lv.push(L.entry, L.stopNow, L.tp1, L.tp2)); if (nxt) lv.push(nxt.entry, nxt.stop, nxt.tp1, nxt.tp2);
     let lo = Infinity, hi = -Infinity; for (let i = i0; i < end; i++) { lo = Math.min(lo, k[i].l); hi = Math.max(hi, k[i].h); }
     lv.forEach(v => { lo = Math.min(lo, v); hi = Math.max(hi, v); });
     const pad = (hi - lo) * 0.05; lo -= pad; hi += pad;
@@ -462,30 +528,50 @@ OF.views.plan = {
     ui.timeAxis(ctx, 0, (end - i0) * bw, ph, k[i0].t, k[end - 1].t + ms, 90);
     for (const z of p.zones) {
       if (z.hi < lo || z.lo > hi) continue;
-      const a = Math.min(0.3, 0.05 + z.w * 0.033), y1 = Y(z.hi + p.atr * 0.06), y2 = Y(z.lo - p.atr * 0.06);
+      const a = Math.min(0.25, 0.04 + z.w * 0.03), y1 = Y(z.hi + p.atr * 0.06), y2 = Y(z.lo - p.atr * 0.06);
       ctx.fillStyle = (z.p > p.px ? 'rgba(239,68,68,' : 'rgba(34,197,94,') + a + ')'; ctx.fillRect(0, y1, pw, Math.max(2, y2 - y1));
-      if (z.w >= 2) { ctx.font = '10px ui-monospace,monospace'; ctx.fillStyle = '#cbd5e1'; ctx.textAlign = 'right'; ctx.textBaseline = 'middle'; ctx.fillText(OF.fp(z.p) + ' · ' + z.src.slice(0, 2).join(', '), pw * 0.62, (y1 + y2) / 2); }
     }
     OF.drawCandles(ctx, k, i0, end, X, Y, bw * 0.65);
     const e21 = OF.ema(k, 21); ctx.strokeStyle = C.blue; ctx.beginPath(); for (let i = i0; i < end; i++) i === i0 ? ctx.moveTo(X(i), Y(e21[i])) : ctx.lineTo(X(i), Y(e21[i])); ctx.stroke();
     if (OF.app.lines.liq) OF.drawLiqLines(ctx, pw, Y, lo, hi);
-    // plan box from creation time (or last candle) to the right edge
     const tx = t => X(i0 + (t - k[i0].t) / ms - 0.5);
-    const x0 = Math.max(0, L ? tx(L.created) : X(end - 1) + bw), x1 = pw - 4, ye = Y(pl.entry), stopShown = L ? L.stopNow : pl.stop;
-    ctx.fillStyle = 'rgba(239,68,68,.16)'; ctx.fillRect(x0, Math.min(ye, Y(stopShown === pl.entry ? pl.stop : stopShown)), x1 - x0, Math.abs(Y(stopShown === pl.entry ? pl.stop : stopShown) - ye));
-    ctx.fillStyle = 'rgba(34,197,94,.16)'; ctx.fillRect(x0, Math.min(ye, Y(pl.tp2)), x1 - x0, Math.abs(Y(pl.tp2) - ye));
-    const tagX = Math.min(x0, pw - 260);
-    ui.hline(ctx, 0, pw, ye, '#e5e7eb', [], (L ? (L.state === 'waiting' ? 'ENTRY (waiting) ' : 'ENTRY ') : 'idea entry ') + OF.fp(pl.entry), tagX);
-    ui.hline(ctx, 0, pw, Y(stopShown), C.sell, [5, 3], 'STOP ' + OF.fp(stopShown) + (L && L.stopNow !== L.stop ? ' (moved)' : ''), tagX);
-    ui.hline(ctx, 0, pw, Y(pl.tp1), C.buy, [5, 3], 'TP1 ' + OF.fp(pl.tp1) + ' (' + pl.rr1.toFixed(1) + 'R)', tagX);
-    ui.hline(ctx, 0, pw, Y(pl.tp2), C.buy, [2, 3], 'TP2 ' + OF.fp(pl.tp2) + ' (' + pl.rr2.toFixed(1) + 'R)', tagX);
-    if (L && L.filledAt) { ctx.beginPath(); ctx.arc(tx(L.filledAt), ye, 5, 0, 7); ctx.fillStyle = '#fff'; ctx.fill(); }
+    // open trades: solid
+    open.forEach((L, idx) => {
+      const x0 = OF.clamp(tx(L.created), 0, pw - 40), lab = `#${idx + 1} ${L.dir > 0 ? 'LONG' : 'SHORT'} `, ye = Y(L.entry), ys = Y(L.stopNow);
+      ctx.fillStyle = 'rgba(239,68,68,.13)'; ctx.fillRect(x0, Math.min(ye, ys), pw - x0, Math.abs(ys - ye));
+      ctx.fillStyle = 'rgba(34,197,94,.13)'; ctx.fillRect(x0, Math.min(ye, Y(L.tp2)), pw - x0, Math.abs(Y(L.tp2) - ye));
+      const lx = Math.min(x0, pw - 280);
+      ui.hline(ctx, x0, pw, ye, '#e5e7eb', [], lab + (L.state === 'waiting' ? 'entry (waiting) ' : 'entry ') + OF.fp(L.entry), lx);
+      ui.hline(ctx, x0, pw, ys, C.sell, [], lab + 'stop ' + OF.fp(L.stopNow) + (L.stopNow !== L.stop ? ' (moved)' : ''), lx);
+      ui.hline(ctx, x0, pw, Y(L.tp1), C.buy, [], lab + 'TP1 ' + OF.fp(L.tp1) + (L.state === 'tp1' ? ' ✓' : ''), lx);
+      ui.hline(ctx, x0, pw, Y(L.tp2), C.buy, [], lab + 'TP2 ' + OF.fp(L.tp2), lx);
+      if (L.filledAt) { ctx.beginPath(); ctx.arc(tx(L.filledAt), ye, 5, 0, 7); ctx.fillStyle = '#fff'; ctx.fill(); }
+    });
+    // next plan: dashed
+    if (nxt) {
+      const x0 = X(end - 1) + bw, lx = Math.min(x0, pw - 260);
+      ui.hline(ctx, 0, pw, Y(nxt.entry), '#a5b4fc', [6, 4], 'NEXT entry ' + OF.fp(nxt.entry), lx);
+      ui.hline(ctx, 0, pw, Y(nxt.stop), '#fca5a5', [6, 4], 'NEXT stop ' + OF.fp(nxt.stop), lx);
+      ui.hline(ctx, 0, pw, Y(nxt.tp1), '#86efac', [6, 4], 'NEXT TP1 ' + OF.fp(nxt.tp1), lx);
+      ui.hline(ctx, 0, pw, Y(nxt.tp2), '#86efac', [2, 4], 'NEXT TP2 ' + OF.fp(nxt.tp2), lx);
+    }
+    OF.drawKeyLevels(ctx, 0, pw, Y, lo, hi);
     if (S.last) { ui.hline(ctx, 0, pw, Y(S.last), 'rgba(229,231,235,.5)', [1, 3]); ui.tag(ctx, pw + 1, Y(S.last), OF.fp(S.last), '#e5e7eb', '#000'); }
     ctx.font = '11px ui-monospace,monospace'; ctx.fillStyle = C.muted; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
-    ctx.fillText(S.symbol + ' · ' + tf + ' · scroll = zoom · drag = pan · double-click = reset · green zones support, red resistance', 8, 8);
+    ctx.fillText(S.symbol + ' · ' + tf + ' · solid = your open trades · dashed = next plan · scroll = zoom · drag = pan', 8, 8);
     ui.cross(ctx, this.mouse, 0, pw, 6, ph - 12, lo, hi, pw + 1, x => k[i0].t + (x / bw) * ms);
   }
 };
+function addForm(o) {
+  const px = OF.S.last || 0, fp = v => v ? v.toFixed(OF.S.info.dp) : '';
+  return `<details class="addf"><summary>➕ Add a trade I already have (e.g. yesterday’s plan)</summary>
+    <div class="addrow"><select name="dir"><option value="long">LONG</option><option value="short">SHORT</option></select>
+    <select name="mode"><option value="intraday">Intraday</option><option value="swing">Swing</option></select>
+    <label>Entry <input name="entry" type="number" step="any" value="${fp(px)}"></label><label>Stop <input name="stop" type="number" step="any"></label>
+    <label>TP1 <input name="tp1" type="number" step="any"></label><label>TP2 <input name="tp2" type="number" step="any" placeholder="optional"></label>
+    <button class="tgl on">Add & track</button></div><div class="err r sm"></div>
+    <div class="muted sm">Size uses your current Account $ and Risk %. It is tracked from now on and gets the same health check.</div></details>`;
+}
 })();
 
 /* ===================== KEY POINTS (plain-language market read, shown on every tab) =====================
@@ -517,13 +603,13 @@ const KCFG = {
   '4h':  { a: '4h',  b: '1d',  atrTf: '4h',  rng: 0.10,  wallPct: 3,   wallBin: 0.001,  wallW: 0.4, rs: 0.02,  sess: 0, week: true },
   '1d':  { a: '1d',  b: '1w',  atrTf: '1d',  rng: 0.18,  wallPct: 3,   wallBin: 0.002,  wallW: 0.3, rs: 0.05,  sess: 0, week: true }
 };
-OF.keyRead = function () {
+OF.keyRead = function (tfArg) {
   const S = OF.S; if (!S || !S.info || !S.last) return null;
-  const tf = OF.app.tf, cf = KCFG[tf] || KCFG['15m'];
-  if (S._kr && S._kr.tf === tf && Date.now() - S._kr.at < 3000) return S._kr;
+  const tf = tfArg || OF.app.tf, cf = KCFG[tf] || KCFG['15m'], cache = (S._krm = S._krm || {});
+  if (cache[tf] && Date.now() - cache[tf].at < 3000) return cache[tf];
   const kd = S.k['1d'], kA = S.k[cf.a], kB = cf.b === '1w' ? OF.loadWeekly() : S.k[cf.b], kT = S.k[cf.atrTf];
   [cf.a, cf.b, cf.atrTf].forEach(x => { if (x !== '1w' && !S.k[x]) OF.loadKlines(x); });
-  if (!kA || kA.length < 30 || !kT || kT.length < 20) return S._kr && S._kr.tf === tf ? S._kr : null;
+  if (!kA || kA.length < 30 || !kT || kT.length < 20) return cache[tf] || null;
   const px = S.last, atr = OF.atr(kT) || px * 0.002, ss = OF.session(), now = OF.now();
   const met = OF.meters(), M = {}; if (met) for (const m of met.list) M[m.key] = m;
   const mt = OF.mtf(), T = {}; if (mt) for (const r of mt.rows) T[r.tf] = r.score;
@@ -587,8 +673,8 @@ OF.keyRead = function () {
   else { lean = `MIXED — the ${cf.sess ? 'day' : tf} trend is ${trend === 'UP' ? 'up' : 'down'} but ${pside.toLowerCase()} are pushing right now. Wait for a break of ${rTop ? fp(rTop) : '—'} or ${sBot ? fp(sBot) : '—'}.`; leanCls = 'flat'; }
   const brk = `Above <b>${rTop ? fp(rTop) : '—'}</b> → buyers take control, next ${res2 ? fp(res2.p) : rTop ? fp(rTop + atr * 2) : '—'} · Below <b>${sBot ? fp(sBot) : '—'}</b> → sellers take control, next ${sup2 ? fp(sup2.p) : sBot ? fp(sBot - atr * 2) : '—'}`;
   const where = inside ? `Price is sitting ON a key zone (${fp(inside.p)}) — expect a reaction here.` : res && sup ? `Price is ${Math.abs(res.p - px) < Math.abs(px - sup.p) ? 'closer to resistance' : 'closer to support'}.` : '';
-  S._kr = { at: Date.now(), tf, trendLabel: cf.sess ? 'TODAY’S TREND' : 'TREND (' + tf + ' + ' + nm(cf.b) + ')', px, atr, zones: zs, res, sup, res2, sup2, inside, trend, trendWhy: why, ts, pressure: pr, pside, buyShare, lean, leanCls, brk, where };
-  return S._kr;
+  cache[tf] = { at: Date.now(), tf, trendLabel: cf.sess ? 'TODAY’S TREND' : 'TREND (' + tf + ' + ' + nm(cf.b) + ')', px, atr, zones: zs, res, sup, res2, sup2, inside, trend, trendWhy: why, ts, pressure: pr, pside, buyShare, lean, leanCls, brk, where };
+  return cache[tf];
 };
 
 /* Draw the key levels as highlighted bands with plain labels (heatmap, columns, charts). */
