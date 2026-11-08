@@ -178,6 +178,7 @@ function tick(force) {
   n++;
   const S = OF.S; if (!S) return;
   if (force || n % 4 === 0) { try { OF.lastDecision = OF.decision(); } catch (e) { console.error(e); } updateHeader(); try { renderMtf(); } catch (e) { console.error(e); } try { renderKeyRead(); } catch (e) { console.error(e); } }
+  if (n % 20 === 0) { try { OF.views.plan.autoTick(); } catch (e) { console.error(e); } }
   const v = cur; if (!v) return;
   const isCanvas = !!v.c;
   if (force || isCanvas || n % 2 === 0) { ui.lblReset(); try { v.render(); } catch (e) { console.error(e); } }

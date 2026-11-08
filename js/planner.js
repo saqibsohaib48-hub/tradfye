@@ -330,7 +330,7 @@ function statusOf(L, px) {
 
 OF.views.plan = {
   label: 'Trade plan', title: 'My open trades with live health checks, the next plan, and history',
-  o: (() => { const o = Object.assign({ acct: 1000, risk: 1, full: false, ctf: '1h', ctfS: '1d', mode: 'intraday', sub: 'next' }, LS.get('plan', {})); if (o.mode === 'scalp') o.mode = 'swing'; if (!['4h', '1d'].includes(o.ctfS)) o.ctfS = '1d'; return o; })(),
+  o: (() => { const o = Object.assign({ acct: 1000, risk: 1, full: false, ctf: '1h', ctfS: '1d', mode: 'intraday', sub: 'next', auto: true }, LS.get('plan', {})); if (o.mode === 'scalp') o.mode = 'swing'; if (!['4h', '1d'].includes(o.ctfS)) o.ctfS = '1d'; return o; })(),
   zv: { n: 72, off: 0 }, an: {},
   save() { LS.set('plan', this.o); },
   isScalp() { return this.o.mode === 'swing'; },
@@ -344,7 +344,7 @@ OF.views.plan = {
       if (x && !a.find(t => t.created === x.created)) { x.id = x.created; x.mode = mode; x.symbol = sym; x.riskUsd = x.riskUsd || 0; a.push(x); }
       if (x) LS.set(k + sym, null);
     }
-    this.T = a; this.saveT();
+    this.T = a; this.Tsym = sym; this.saveT();
   },
   saveT() { LS.set('trades:' + OF.S.symbol, this.T.slice(-300)); },
   openT() { return this.T.filter(t => !FINAL[t.state]); },
@@ -356,6 +356,8 @@ OF.views.plan = {
     tb.append(inp('Account $', 'acct', 100), inp('Risk %', 'risk', 0.25));
     if (o.mode === 'swing') tb.append(ui.seg('Chart', [['4h', '4h'], ['1d', '1D']], o.ctfS, v => { o.ctfS = v; this.save(); this.zv = { n: 72, off: 0 }; }));
     else tb.append(ui.seg('Chart', [['15m', '15m'], ['1h', '1h'], ['4h', '4h']], o.ctf, v => { o.ctf = v; this.save(); this.zv = { n: 72, off: 0 }; }));
+    tb.append(ui.toggle('🤖 Auto', o.auto, v => { o.auto = v; this.save(); this.html(); }, 'Fully automatic: waits for the candle close, confirms, creates and tracks the trade by itself. One auto trade per mode at a time.'));
+    if (window.Notification && Notification.permission === 'default') { const nb = el('button', 'tgl', '🔔 Notify me'); nb.title = 'Desktop notification when a trade is auto-confirmed or hits a level'; nb.onclick = () => Notification.requestPermission().then(() => nb.remove()); tb.append(nb); }
     tb.append(ui.toggle('⛶ Full chart', o.full, v => { o.full = v; this.save(); this.applyFull(); }, 'Chart takes the page. Scroll = zoom, drag = pan, double-click = reset.'));
   },
   renderSub() {
@@ -403,6 +405,58 @@ OF.views.plan = {
     }
     if (changed || !this._sv || Date.now() - this._sv > 10000) { this.saveT(); this._sv = Date.now(); }
     if (changed) { this.renderSub(); this.lastHtml = 0; }
+  },
+  /* ---------- 🤖 AUTO: watch the candle close, confirm, create and track trades by itself ---------- */
+  autoKey(mode) { return 'auto:' + OF.S.symbol + ':' + mode; },
+  autoTick() {
+    const S = OF.S; if (!S || !S.info || !S.last) return;
+    if (!this.T || this.Tsym !== S.symbol) this.load();
+    this.trackAll();
+    if (!this.o.auto) return;
+    for (const mode of ['intraday', 'swing']) {
+      const p = this.analysis(mode); if (!p || p.wait) continue;
+      const tf = mode === 'swing' ? '1d' : '1h', ms = OF.tfMs[tf], k = S.k[tf]; if (!k || k.length < 3) continue;
+      const st = LS.get(this.autoKey(mode), {}), open = this.openT().filter(t => t.mode === mode), last = k[k.length - 2];
+      const lastAuto = this.T.filter(t => t.mode === mode && t.auto).sort((a, b) => b.created - a.created)[0];
+      const cooling = lastAuto && FINAL[lastAuto.state] && OF.now() - (lastAuto.closedAt || lastAuto.created) < ms;
+      const log = m => { (st.log = st.log || []).push([OF.now(), m]); if (st.log.length > 30) st.log.shift(); };
+      const add = (q, why) => {
+        const t = newTrade(this.o, S.symbol, mode, Object.assign({}, q, { conf: p.conf, prob: q.dir > 0 ? p.probL : p.probS }));
+        t.auto = true; t.events.push([OF.now(), '🤖 ' + why]); this.T.push(t); this.saveT(); log('Auto trade created: ' + (q.dir > 0 ? 'LONG' : 'SHORT') + ' — ' + why);
+        OF.notify(`🤖 Auto ${q.dir > 0 ? 'LONG' : 'SHORT'} ${MODES[mode].name} confirmed`, `${why}. ${q.eType === 'limit' ? 'Limit entry' : 'Entry'} ${OF.fp(q.entry)} · stop ${OF.fp(q.stop)} · TP1 ${OF.fp(q.tp1)} · TP2 ${OF.fp(q.tp2)}`);
+        this.renderSub(); this.lastHtml = 0;
+      };
+      if (st.lastClose == null) st.lastClose = last.t;            // first run: never fire on old candles
+      else if (last.t > st.lastClose) {                            // a new candle has just closed
+        st.lastClose = last.t;
+        const arm = st.armed || { long: p.long.trigger, short: p.short.trigger };
+        const dir = last.c > arm.long ? 1 : last.c < arm.short ? -1 : 0;
+        if (!dir) log(`${tf} closed at ${OF.fp(last.c)} — inside ${OF.fp(arm.short)}–${OF.fp(arm.long)}, still waiting`);
+        else if (open.length) log(`${tf} closed ${dir > 0 ? 'above' : 'below'} the trigger, but a trade is already open — skipped`);
+        else if (cooling) log(`${tf} trigger hit, but the last auto trade just finished — waiting one candle`);
+        else if (p.bias * dir < -0.3) log(`${tf} closed ${dir > 0 ? 'above' : 'below'} the trigger, but the analysis is strongly against — skipped`);
+        else add(dir > 0 ? p.long : p.short, `${tf} candle closed ${dir > 0 ? 'above' : 'below'} ${OF.fp(dir > 0 ? arm.long : arm.short)} at ${OF.fp(last.c)} — confirmed`);
+      }
+      if (p.plan && !this.openT().filter(t => t.mode === mode).length && !cooling) add(p.plan, 'analysis confirmed the setup (' + (p.scalp ? p.passed + '/9 checks' : Math.round(p.agree * 100) + '% of factors agree') + ')');
+      st.armed = { long: p.long.trigger, short: p.short.trigger, at: Date.now() };
+      st.nextClose = k[k.length - 1].t + ms;
+      LS.set(this.autoKey(mode), st);
+    }
+  },
+  /* banner at the top of the chart: waiting for confirmation → confirmed / managed */
+  drawStage(ctx, pw, open, p) {
+    const S = OF.S, mode = this.o.mode, st = LS.get(this.autoKey(mode), {}), tf = mode === 'swing' ? 'daily' : '1h';
+    const left = st.nextClose ? Math.max(0, st.nextClose - OF.now()) : null, mm = left == null ? '' : left > 36e5 ? Math.floor(left / 36e5) + 'h ' + Math.floor(left % 36e5 / 6e4) + 'm' : Math.floor(left / 6e4) + 'm ' + Math.floor(left % 6e4 / 1e3) + 's';
+    let lines;
+    if (!this.o.auto) lines = [['#9ca3af', '🤖 Auto is OFF — turn it on in the toolbar to confirm and track trades automatically']];
+    else if (open.length) { const L = open[open.length - 1], stt = statusOf(L, S.last); lines = [[L.state === 'waiting' ? C.amber : C.buy, `${L.state === 'waiting' ? '⏳ CONFIRMED — waiting for entry fill' : '✅ CONFIRMED — trade open'} · #${open.length} ${L.dir > 0 ? 'LONG' : 'SHORT'}${L.auto ? ' (auto)' : ''}`], ['#cbd5e1', stt.head.replace(/<[^>]+>/g, '')]]; }
+    else if (p.plan) lines = [[C.buy, '✅ CONFIRMED by the analysis — creating the trade…']];
+    else lines = [[C.amber, `⏳ WAITING FOR CONFIRMATION — next ${tf} close in ${mm}`], [C.buy, `LONG if it closes above ${OF.fp(p.long.trigger)} (${((p.long.trigger / S.last - 1) * 100).toFixed(2)}%)`], [C.sell, `SHORT if it closes below ${OF.fp(p.short.trigger)} (${((p.short.trigger / S.last - 1) * 100).toFixed(2)}%)`]];
+    const lg = (st.log || []).slice(-1)[0]; if (lg && this.o.auto) lines.push(['#9ca3af', 'last: ' + OF.hm(lg[0]) + ' ' + lg[1]]);
+    ctx.font = 'bold 12px ui-monospace,monospace'; let w = 0; lines.forEach(([, t]) => { w = Math.max(w, ctx.measureText(t).width); });
+    ctx.fillStyle = 'rgba(10,13,18,.9)'; ctx.fillRect(8, 40, w + 16, lines.length * 17 + 8); ctx.strokeStyle = lines[0][0]; ctx.strokeRect(8.5, 40.5, w + 15, lines.length * 17 + 7);
+    ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+    lines.forEach(([c, t], i) => { ctx.font = (i ? '' : 'bold ') + '12px ui-monospace,monospace'; ctx.fillStyle = c; ctx.fillText(t, 16, 45 + i * 17); });
   },
   /* re-test an open trade against the latest data */
   health(L) {
@@ -494,7 +548,7 @@ OF.views.plan = {
     // 2) the next plan
     const pl = p.plan;
     let head, body, cls = 'wait', icon = '⏳';
-    if (pl) { cls = 'on'; icon = '✨'; head = `NEXT PLAN: ${pl.dir > 0 ? 'LONG' : 'SHORT'} ${pl.eType === 'limit' ? 'limit at ' + fmt(pl.entry) : 'at market ' + fmt(pl.entry)}`; body = `Stop ${fmt(pl.stop)} · TP1 ${fmt(pl.tp1)} (${pl.rr1.toFixed(1)}R) · TP2 ${fmt(pl.tp2)} (${pl.rr2.toFixed(1)}R). Levels keep updating until you press <b>Track this plan</b>, which freezes them and adds the trade to My trades.`; }
+    if (pl) { cls = 'on'; icon = '✨'; head = `NEXT PLAN: ${pl.dir > 0 ? 'LONG' : 'SHORT'} ${pl.eType === 'limit' ? 'limit at ' + fmt(pl.entry) : 'at market ' + fmt(pl.entry)}`; body = `Stop ${fmt(pl.stop)} · TP1 ${fmt(pl.tp1)} (${pl.rr1.toFixed(1)}R) · TP2 ${fmt(pl.tp2)} (${pl.rr2.toFixed(1)}R). ${this.o.auto ? '🤖 Auto is ON — it will be tracked automatically within seconds.' : 'Levels keep updating until you press <b>Track this plan</b>, which freezes them and adds the trade to My trades.'}`; }
     else if (p.scalp) { const rb = rankIdeas(p)[0]; head = `NO CONFIRMED SWING — ${p.passed}/9 checks pass`; body = `Missing: ${p.checks.filter(c => !c.ok).map(c => c.name).join(' · ')}. Do nothing yet. <b>More likely next: ${rb.q.dir > 0 ? 'LONG' : 'SHORT'}</b> — ${rb.why.join(', ')}. Both ideas are drawn on the chart.${rankIdeas(p).bothBad ? ' <b class="y">Both ideas have lost money at these levels in the past (win % below break-even) — waiting is the better choice.</b>' : ''}`; }
     else { const rb = rankIdeas(p)[0]; head = 'NO TRADE right now'; body = `${p.why.join('; ')}. Watch for a 1h close above <b>${fmt(p.long.trigger)}</b> (long idea) or below <b>${fmt(p.short.trigger)}</b> (short idea). <b>More likely next: ${rb.q.dir > 0 ? 'LONG' : 'SHORT'}</b> — ${rb.why.join(', ')}. Both ideas are drawn on the chart.${rankIdeas(p).bothBad ? ' <b class="y">Both ideas have lost money at these levels in the past (win % below break-even) — waiting is the better choice.</b>' : ''}`; }
     const pr = p.prob;
@@ -535,7 +589,7 @@ OF.views.plan = {
     return `📂 ${n} open trade${n === 1 ? '' : 's'} tracked (health re-checked every 15 s) · ✨ Next plan (${MODES[this.o.mode].name}): ${p && !p.wait ? (p.plan ? (p.side > 0 ? 'LONG' : 'SHORT') + ' setup ready' : 'no trade right now') : 'loading…'} · chart: solid lines = your open trades, dashed = next plan.`;
   },
   render() {
-    if (!this.T) this.load();
+    if (!this.T || this.Tsym !== OF.S.symbol) this.load();
     this.trackAll();
     if (Date.now() - this.lastHtml > (this.o.sub === 'next' ? 15000 : 3000)) this.html();
     const p = this.analysis(this.o.mode), c = this.c.fit(), ctx = c.ctx, W = c.w, H = c.h, S = OF.S;
@@ -546,7 +600,7 @@ OF.views.plan = {
     this.pw = pw;
     const n = Math.min(this.zv.n, k.length), end = Math.max(n, k.length - this.zv.off), i0 = Math.max(0, end - n);
     const bw = pw / (n + Math.max(6, n * 0.18)), X = i => (i - i0 + 0.5) * bw; this.bw = bw;
-    const nxt = this.o.sub !== 'open' ? p.plan : null, lv = [], ideas = this.o.sub === 'next' && !p.plan ? rankIdeas(p) : [];
+    const nxt = this.o.sub !== 'open' && !open.length ? p.plan : null, lv = [], ideas = !p.plan && !open.length ? rankIdeas(p) : [];
     ideas.forEach(r => lv.push(r.q.entry, r.q.stop, r.q.tp1));
     open.forEach(L => lv.push(L.entry, L.stopNow, L.tp1, L.tp2)); if (nxt) lv.push(nxt.entry, nxt.stop, nxt.tp1, nxt.tp2);
     let lo = Infinity, hi = -Infinity; for (let i = i0; i < end; i++) { lo = Math.min(lo, k[i].l); hi = Math.max(hi, k[i].h); }
@@ -609,6 +663,8 @@ OF.views.plan = {
     });
     OF.drawKeyLevels(ctx, 0, pw, Y, lo, hi);
     if (S.last) { ui.hline(ctx, 0, pw, Y(S.last), 'rgba(229,231,235,.5)', [1, 3]); ui.tag(ctx, pw + 1, Y(S.last), OF.fp(S.last), '#e5e7eb', '#000'); }
+    ctx.font = '11px ui-monospace,monospace'; ctx.fillStyle = C.muted; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+    this.drawStage(ctx, pw, open, p);
     ctx.font = '11px ui-monospace,monospace'; ctx.fillStyle = C.muted; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
     ctx.fillText(S.symbol + ' · ' + tf + ' · ' + MODES[this.o.mode].name + ' trades solid, next plan dashed · scroll = time zoom · scroll on price scale (or Shift) = price zoom · drag = pan · double-click = reset', 8, 8);
     if (others) { ctx.fillStyle = C.amber; ctx.fillText(`${others} ${this.o.mode === 'swing' ? 'intraday' : 'swing'} trade${others > 1 ? 's' : ''} not shown here — switch Mode to ${this.o.mode === 'swing' ? 'Intraday 1h' : '📅 Swing 1D'} to see ${others > 1 ? 'them' : 'it'}`, 8, 22); }
@@ -771,3 +827,28 @@ OF.drawKeyLevels = (ctx, x0, x1, Y, lo, hi) => {
   band(k.res2, 'res', 'next resistance', false); band(k.sup2, 'sup', 'next support', false);
 };
 })();
+
+/* toast + optional desktop notification */
+OF.notify = function (title, body) {
+  let box = document.getElementById('toasts'); if (!box) { box = document.createElement('div'); box.id = 'toasts'; document.body.appendChild(box); }
+  const t = document.createElement('div'); t.className = 'toast'; t.innerHTML = `<b>${title}</b><div>${body}</div>`; t.onclick = () => t.remove(); box.appendChild(t);
+  setTimeout(() => t.remove(), 20000);
+  try { if (window.Notification && Notification.permission === 'granted') new Notification(title, { body }); } catch (e) {}
+  const old = document.title; document.title = '🔔 ' + title; setTimeout(() => { document.title = old; }, 8000);
+};
+/* tracked trades + auto triggers on the other charts (Lines → Plan) */
+OF.drawTradeLines = function (ctx, pw, Y, lo, hi) {
+  const v = OF.views.plan, S = OF.S; if (!v || !v.T || v.Tsym !== S.symbol) return;
+  const open = v.T.filter(t => !({ stopped: 1, done: 1, breakeven: 1, missed: 1, expired: 1, closed: 1 })[t.state]);
+  open.forEach((L, i) => {
+    const tag = `#${i + 1} ${L.dir > 0 ? 'LONG' : 'SHORT'}${L.auto ? ' auto' : ''} `;
+    [['entry', L.entry, '#e5e7eb'], ['stop', L.stopNow, OF.C.sell], ['TP1', L.tp1, OF.C.buy], ['TP2', L.tp2, OF.C.buy]].forEach(([n, p, c]) => { if (p > lo && p < hi) OF.ui.hline(ctx, 0, pw, Y(p), c, [], tag + n + ' ' + OF.fp(p), pw * 0.55); });
+  });
+  if (!open.length && v.o.auto) {
+    const st = OF.LS.get('auto:' + S.symbol + ':intraday', {});
+    if (st.armed) {
+      if (st.armed.long > lo && st.armed.long < hi) OF.ui.hline(ctx, 0, pw, Y(st.armed.long), '#86efac', [2, 2], '⏳ LONG if 1h closes above ' + OF.fp(st.armed.long), pw * 0.55);
+      if (st.armed.short > lo && st.armed.short < hi) OF.ui.hline(ctx, 0, pw, Y(st.armed.short), '#fca5a5', [2, 2], '⏳ SHORT if 1h closes below ' + OF.fp(st.armed.short), pw * 0.55);
+    }
+  }
+};

@@ -452,6 +452,7 @@ OF.views.chart = {
 
 /* shared overlay lines (Plan / Γ / Liq toggles in the header) */
 OF.drawPlanLines = (ctx, pw, Y, lo, hi) => {
+  if (OF.drawTradeLines) OF.drawTradeLines(ctx, pw, Y, lo, hi);
   const d = OF.lastDecision; if (!d || !d.plan) return;
   if (d.plan.buyAbove && d.plan.buyAbove < hi && d.plan.buyAbove > lo) ui.hline(ctx, 0, pw, Y(d.plan.buyAbove), C.buy, [2, 3], 'buy above ' + OF.fp(d.plan.buyAbove));
   if (d.plan.sellBelow && d.plan.sellBelow > lo && d.plan.sellBelow < hi) ui.hline(ctx, 0, pw, Y(d.plan.sellBelow), C.sell, [2, 3], 'sell below ' + OF.fp(d.plan.sellBelow));
