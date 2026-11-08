@@ -506,64 +506,88 @@ function zonesOf(lv, px, atr) {
   for (const l of lv) { const z = zs[zs.length - 1]; if (z && l.p - z.hi < atr * 0.35) { z.hi = Math.max(z.hi, l.p); z.pw += l.p * l.w; z.w += l.w; z.src.push(l.src); z.fake = z.fake || l.fake; } else zs.push({ lo: l.p, hi: l.p, pw: l.p * l.w, w: l.w, src: [l.src], fake: !!l.fake }); }
   zs.forEach(z => { z.p = z.pw / z.w; z.src = [...new Set(z.src)]; }); return zs;
 }
+/* Which data the key points use for each header timeframe. a/b = swing timeframes, atrTf = zone width,
+   rng = how far from price to look, wall* = order-book walls, rs = round-number step, sess = weight of intraday session levels. */
+const KCFG = {
+  '1m':  { a: '5m',  b: '15m', atrTf: '5m',  rng: 0.008, wallPct: 0.5, wallBin: 0.0001, wallW: 1.2, rs: 0.002, sess: 1 },
+  '5m':  { a: '5m',  b: '15m', atrTf: '5m',  rng: 0.012, wallPct: 0.8, wallBin: 0.00015, wallW: 1.1, rs: 0.003, sess: 1 },
+  '15m': { a: '15m', b: '1h',  atrTf: '15m', rng: 0.02,  wallPct: 1,   wallBin: 0.0002, wallW: 1,   rs: 0.005, sess: 1 },
+  '30m': { a: '30m', b: '1h',  atrTf: '30m', rng: 0.03,  wallPct: 1.5, wallBin: 0.0003, wallW: 0.9, rs: 0.005, sess: 1 },
+  '1h':  { a: '1h',  b: '4h',  atrTf: '1h',  rng: 0.05,  wallPct: 2,   wallBin: 0.0005, wallW: 0.6, rs: 0.01,  sess: 0.6 },
+  '4h':  { a: '4h',  b: '1d',  atrTf: '4h',  rng: 0.10,  wallPct: 3,   wallBin: 0.001,  wallW: 0.4, rs: 0.02,  sess: 0, week: true },
+  '1d':  { a: '1d',  b: '1w',  atrTf: '1d',  rng: 0.18,  wallPct: 3,   wallBin: 0.002,  wallW: 0.3, rs: 0.05,  sess: 0, week: true }
+};
 OF.keyRead = function () {
   const S = OF.S; if (!S || !S.info || !S.last) return null;
-  if (S._kr && Date.now() - S._kr.at < 3000) return S._kr;
-  const k15 = S.k['15m'], k1h = S.k['1h'], kd = S.k['1d']; if (!k15 || k15.length < 30 || !k1h || k1h.length < 30) return null;
-  const px = S.last, atr = OF.atr(k15) || px * 0.002, ss = OF.session(), now = OF.now();
+  const tf = OF.app.tf, cf = KCFG[tf] || KCFG['15m'];
+  if (S._kr && S._kr.tf === tf && Date.now() - S._kr.at < 3000) return S._kr;
+  const kd = S.k['1d'], kA = S.k[cf.a], kB = cf.b === '1w' ? OF.loadWeekly() : S.k[cf.b], kT = S.k[cf.atrTf];
+  [cf.a, cf.b, cf.atrTf].forEach(x => { if (x !== '1w' && !S.k[x]) OF.loadKlines(x); });
+  if (!kA || kA.length < 30 || !kT || kT.length < 20) return S._kr && S._kr.tf === tf ? S._kr : null;
+  const px = S.last, atr = OF.atr(kT) || px * 0.002, ss = OF.session(), now = OF.now();
   const met = OF.meters(), M = {}; if (met) for (const m of met.list) M[m.key] = m;
   const mt = OF.mtf(), T = {}; if (mt) for (const r of mt.rows) T[r.tf] = r.score;
-  const lv = [], add = (p, w, src, fake) => { if (p && isFinite(p) && Math.abs(p / px - 1) < 0.02) lv.push({ p, w, src, fake }); };
+  const lv = [], add = (p, w, src, fake) => { if (p && isFinite(p) && Math.abs(p / px - 1) < cf.rng) lv.push({ p, w, src, fake }); };
   if (S.synced) {
-    const bb = OF.bookBins(1, OF.niceStep(px * 0.0002)), ws = [];
+    const bb = OF.bookBins(cf.wallPct, OF.niceStep(px * cf.wallBin)), ws = [];
     for (const [p, n] of bb.b) ws.push({ p: p + bb.bin / 2, n, side: 'bid' }); for (const [p, n] of bb.a) ws.push({ p: p + bb.bin / 2, n, side: 'ask' });
     ws.sort((a, b) => b.n - a.n); const mx = ws.length ? ws[0].n : 1;
     for (const w of ws.slice(0, 10)) {
       const st = wallStand(w.p), pu = pullsNear(w.p, bb.bin * 1.5), fake = pu >= 3;
-      let wt = 1 + 2 * w.n / mx; if (st > 120) wt *= 1.3; if (fake) wt *= 0.4;
+      let wt = (1 + 2 * w.n / mx) * cf.wallW; if (st > 120) wt *= 1.3; if (fake) wt *= 0.4;
       add(w.p, wt, `${w.side} wall ${OF.fmtUsd(w.n)}${fake ? ' ⚠ pulled ' + pu + '×' : st > 60 ? ' · ' + (st < 120 ? Math.round(st) + 's' : Math.round(st / 60) + 'm') + ' old' : ''}`, fake);
     }
   }
   if (ss) {
-    if (ss.today) { add(ss.today.poc, 1.6, 'today POC'); add(ss.today.vah, 1.3, 'today VAH'); add(ss.today.val, 1.3, 'today VAL'); }
-    if (ss.vwap) add(ss.vwap, 1.4, 'VWAP');
-    if (ss.prev) add(ss.prev.poc, 1, 'yesterday POC');
+    const q = cf.sess;
+    if (q && ss.today) { add(ss.today.poc, 1.6 * q, 'today POC'); add(ss.today.vah, 1.3 * q, 'today VAH'); add(ss.today.val, 1.3 * q, 'today VAL'); }
+    if (q && ss.vwap) add(ss.vwap, 1.4 * q, 'VWAP');
+    if (q && ss.prev) add(ss.prev.poc, 1 * q, 'yesterday POC');
     if (S.day && S.day.prev.length) { let h = -Infinity, l = Infinity; for (const c of S.day.prev) { h = Math.max(h, c.h); l = Math.min(l, c.l); } add(h, 1.6, 'yesterday high'); add(l, 1.6, 'yesterday low'); }
   }
   const dOpen = kd && kd.length ? kd[kd.length - 1].o : null; add(dOpen, 0.9, 'today open');
-  const p15 = pivots(k15, 3, 120), p1 = pivots(k1h, 2, 80);
-  p15.hi.slice(-5).forEach(p => add(p, 1, '15m swing high')); p15.lo.slice(-5).forEach(p => add(p, 1, '15m swing low'));
-  p1.hi.slice(-5).forEach(p => add(p, 1.5, '1h swing high')); p1.lo.slice(-5).forEach(p => add(p, 1.5, '1h swing low'));
+  const nm = x => x === '1d' ? 'daily' : x === '1w' ? 'weekly' : x;
+  const pA = pivots(kA, 3, 120); pA.hi.slice(-5).forEach(p => add(p, 1.2, nm(cf.a) + ' swing high')); pA.lo.slice(-5).forEach(p => add(p, 1.2, nm(cf.a) + ' swing low'));
+  if (kB && kB.length > 20) { const pB = pivots(kB, 2, 100); pB.hi.slice(-5).forEach(p => add(p, 1.8, nm(cf.b) + ' swing high')); pB.lo.slice(-5).forEach(p => add(p, 1.8, nm(cf.b) + ' swing low')); }
+  if (cf.week) { const kw = OF.loadWeekly(); if (kw && kw.length > 2) { const w = kw[kw.length - 2]; add(w.h, 2, 'last week high'); add(w.l, 2, 'last week low'); } }
   const lm = OF.liqMap(); if (lm) lm.rows.slice().sort((a, b) => (b.long + b.short) - (a.long + a.short)).slice(0, 6).forEach(r => add(r.p + lm.bin / 2, 1.2, (r.p > lm.mid ? 'short' : 'long') + ' liquidations ' + OF.fmtUsd(r.long + r.short)));
-  const rs = OF.niceStep(px * 0.005); for (let j = -2; j <= 2; j++) add((Math.round(px / rs) + j) * rs, 0.5, 'round number');
+  const rs = OF.niceStep(px * cf.rs); for (let j = -2; j <= 2; j++) add((Math.round(px / rs) + j) * rs, 0.5, 'round number');
   const zs = zonesOf(lv, px, atr);
   const above = zs.filter(z => z.lo > px).sort((a, b) => a.p - b.p), below = zs.filter(z => z.hi < px).sort((a, b) => b.p - a.p);
-  const pick = (list, min) => list.find(z => z.w >= min && !(z.fake && z.src.length === 1)) || list.find(z => z.w >= min) || list[0] || null;
+  const pick = (list, min) => list.find(z => z.w >= min && !(z.fake && z.src.length === 1)) || list.find(z => z.w >= min) || list.slice(0, 6).reduce((b, z) => !b || z.w > b.w ? z : b, null);
   const res = pick(above, 2.2), sup = pick(below, 2.2);
   const res2 = res ? pick(above.filter(z => z.lo > res.hi + atr * 0.3), 1.8) : null, sup2 = sup ? pick(below.filter(z => z.hi < sup.lo - atr * 0.3), 1.8) : null;
   const inside = zs.find(z => z.lo - atr * 0.1 <= px && z.hi + atr * 0.1 >= px && z.w >= 2.2) || null;
 
   // today's trend
   const why = []; let ts = 0;
-  if (ss && ss.vwap) { const a = px > ss.vwap; ts += a ? 0.3 : -0.3; why.push((a ? 'above' : 'below') + ' VWAP ' + OF.fp(ss.vwap)); }
-  if (dOpen) { const a = px > dOpen; ts += a ? 0.25 : -0.25; why.push((a ? 'above' : 'below') + ' today’s open ' + OF.fp(dOpen) + ' (' + ((px / dOpen - 1) * 100).toFixed(2) + '%)'); }
-  if (T['1h'] != null) { ts += OF.clamp(T['1h'] / 100, -1, 1) * 0.25; why.push('1h ' + (T['1h'] > 15 ? 'up' : T['1h'] < -15 ? 'down' : 'flat')); }
-  if (T['4h'] != null) { ts += OF.clamp(T['4h'] / 100, -1, 1) * 0.2; why.push('4h ' + (T['4h'] > 15 ? 'up' : T['4h'] < -15 ? 'down' : 'flat')); }
+  if (!cf.sess) {   // higher timeframes: trend from that timeframe and the next one up
+    for (const [x, w] of [[cf.a, 0.55], [cf.b, 0.45]]) {
+      const k = x === '1w' ? OF.loadWeekly() : S.k[x]; if (!k || k.length < 55) continue;
+      const e21 = OF.ema(k, 21), e50 = OF.ema(k, 50), i = k.length - 1, a = OF.atr(k) || 1;
+      const sc = OF.clamp(0.5 * Math.sign(e21[i] - e50[i]) + 0.5 * (k[i].c - e21[i]) / a, -1, 1);
+      ts += sc * w; why.push(nm(x) + ' ' + (sc > 0.2 ? 'up' : sc < -0.2 ? 'down' : 'flat') + ' (price ' + (k[i].c > e21[i] ? 'above' : 'below') + ' EMA21 ' + OF.fp(e21[i]) + ')');
+    }
+  } else if (ss && ss.vwap) { const a = px > ss.vwap; ts += a ? 0.3 : -0.3; why.push((a ? 'above' : 'below') + ' VWAP ' + OF.fp(ss.vwap)); }
+  if (cf.sess && dOpen) { const a = px > dOpen; ts += a ? 0.25 : -0.25; why.push((a ? 'above' : 'below') + ' today’s open ' + OF.fp(dOpen) + ' (' + ((px / dOpen - 1) * 100).toFixed(2) + '%)'); }
+  if (cf.sess && T['1h'] != null) { ts += OF.clamp(T['1h'] / 100, -1, 1) * 0.25; why.push('1h ' + (T['1h'] > 15 ? 'up' : T['1h'] < -15 ? 'down' : 'flat')); }
+  if (cf.sess && T['4h'] != null) { ts += OF.clamp(T['4h'] / 100, -1, 1) * 0.2; why.push('4h ' + (T['4h'] > 15 ? 'up' : T['4h'] < -15 ? 'down' : 'flat')); }
   const trend = ts > 0.35 ? 'UP' : ts < -0.35 ? 'DOWN' : 'RANGE';
   // pressure now
   const f5 = OF.flow(now - 300000), f1 = OF.flow(now - 60000), imb = M.imb ? M.imb.score / 100 : 0;
-  const pr = OF.clamp(0.4 * (f5.tot ? f5.d / f5.tot : 0) * 2 + 0.3 * (f1.tot ? f1.d / f1.tot : 0) * 2 + 0.3 * imb, -1, 1);
+  let pr = OF.clamp(0.4 * (f5.tot ? f5.d / f5.tot : 0) * 2 + 0.3 * (f1.tot ? f1.d / f1.tot : 0) * 2 + 0.3 * imb, -1, 1);
+  const dm = M['d' + tf]; if (!cf.sess && dm && dm.score != null) pr = OF.clamp(0.4 * pr + 0.6 * dm.score / 100, -1, 1);
   const pside = pr > 0.15 ? 'BUYERS' : pr < -0.15 ? 'SELLERS' : 'BALANCED', buyShare = f5.tot ? f5.b / f5.tot : 0.5;
   // what it means
   const fp = OF.fp, rTop = res ? res.hi : null, sBot = sup ? sup.lo : null;
   let lean, leanCls;
   if (trend === 'UP' && pside !== 'SELLERS') { lean = `Lean LONG — trend and pressure agree. Better entries are dips toward support ${sup ? fp(sup.p) : '—'}; idea is wrong below ${sBot ? fp(sBot) : '—'}.`; leanCls = 'up'; }
   else if (trend === 'DOWN' && pside !== 'BUYERS') { lean = `Lean SHORT — trend and pressure agree. Better entries are rallies into resistance ${res ? fp(res.p) : '—'}; idea is wrong above ${rTop ? fp(rTop) : '—'}.`; leanCls = 'dn'; }
-  else if (trend === 'RANGE') { lean = `RANGE day — no trend. Play the edges only if the wall holds: buy near ${sup ? fp(sup.p) : '—'}, sell near ${res ? fp(res.p) : '—'}; avoid the middle.`; leanCls = 'flat'; }
-  else { lean = `MIXED — today’s trend is ${trend === 'UP' ? 'up' : 'down'} but ${pside.toLowerCase()} are pushing right now. Wait for a break of ${rTop ? fp(rTop) : '—'} or ${sBot ? fp(sBot) : '—'}.`; leanCls = 'flat'; }
+  else if (trend === 'RANGE') { lean = `${cf.sess ? 'RANGE day' : 'RANGE on ' + tf} — no trend. Play the edges only if the wall holds: buy near ${sup ? fp(sup.p) : '—'}, sell near ${res ? fp(res.p) : '—'}; avoid the middle.`; leanCls = 'flat'; }
+  else { lean = `MIXED — the ${cf.sess ? 'day' : tf} trend is ${trend === 'UP' ? 'up' : 'down'} but ${pside.toLowerCase()} are pushing right now. Wait for a break of ${rTop ? fp(rTop) : '—'} or ${sBot ? fp(sBot) : '—'}.`; leanCls = 'flat'; }
   const brk = `Above <b>${rTop ? fp(rTop) : '—'}</b> → buyers take control, next ${res2 ? fp(res2.p) : rTop ? fp(rTop + atr * 2) : '—'} · Below <b>${sBot ? fp(sBot) : '—'}</b> → sellers take control, next ${sup2 ? fp(sup2.p) : sBot ? fp(sBot - atr * 2) : '—'}`;
   const where = inside ? `Price is sitting ON a key zone (${fp(inside.p)}) — expect a reaction here.` : res && sup ? `Price is ${Math.abs(res.p - px) < Math.abs(px - sup.p) ? 'closer to resistance' : 'closer to support'}.` : '';
-  S._kr = { at: Date.now(), px, atr, zones: zs, res, sup, res2, sup2, inside, trend, trendWhy: why, ts, pressure: pr, pside, buyShare, lean, leanCls, brk, where };
+  S._kr = { at: Date.now(), tf, trendLabel: cf.sess ? 'TODAY’S TREND' : 'TREND (' + tf + ' + ' + nm(cf.b) + ')', px, atr, zones: zs, res, sup, res2, sup2, inside, trend, trendWhy: why, ts, pressure: pr, pside, buyShare, lean, leanCls, brk, where };
   return S._kr;
 };
 

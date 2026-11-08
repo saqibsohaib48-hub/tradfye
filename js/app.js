@@ -156,16 +156,16 @@ function renderKeyRead() {
   const fp = OF.fp, pct = p => ((p / k.px - 1) * 100).toFixed(2) + '%';
   const tcls = k.trend === 'UP' ? 'up' : k.trend === 'DOWN' ? 'dn' : 'flat', tword = k.trend === 'UP' ? '▲ UPTREND' : k.trend === 'DOWN' ? '▼ DOWNTREND' : '◆ RANGE';
   const pcls = k.pside === 'BUYERS' ? 'up' : k.pside === 'SELLERS' ? 'dn' : 'flat';
-  const lvl = (z, kind) => z ? `<div class="krv mono">${fp(z.p)} <small>${pct(z.p)}</small>${z.fake ? ' <span class="y" title="A wall here keeps getting pulled — may be fake">⚠</span>' : ''}</div><div class="krs">${z.src.slice(0, 4).join(' · ')}</div>` : `<div class="krv muted">none within 2%</div>`;
+  const lvl = (z, kind) => z ? `<div class="krv mono">${fp(z.p)} <small>${pct(z.p)}</small>${z.fake ? ' <span class="y" title="A wall here keeps getting pulled — may be fake">⚠</span>' : ''}</div><div class="krs">${z.src.slice(0, 4).join(' · ')}</div>` : `<div class="krv muted">none nearby</div>`;
   if (!open) {
     box.innerHTML = `<div class="krmini"><button class="krt" title="Show key points">▸ Key points</button> <b class="${tcls}">${tword}</b> · pressure <b class="${pcls}">${k.pside}</b> · <span class="r">R ${k.res ? fp(k.res.p) : '—'}</span> · <span class="g">S ${k.sup ? fp(k.sup.p) : '—'}</span> · <span class="muted">${k.lean}</span></div>`;
   } else {
     box.innerHTML = `<div class="kr">
       <button class="krt" title="Hide key points">▾</button>
-      <div class="krc ${tcls}"><div class="krh">TODAY’S TREND</div><div class="krv">${tword}</div><div class="krs">${k.trendWhy.join(' · ')}</div></div>
+      <div class="krc ${tcls}"><div class="krh">${k.trendLabel}</div><div class="krv">${tword}</div><div class="krs">${k.trendWhy.join(' · ')}</div></div>
       <div class="krc ${pcls}"><div class="krh">PRESSURE NOW</div><div class="krv">${k.pside} <small>${Math.round(k.buyShare * 100)}% buys (5 min)</small></div><div class="kbar"><i style="width:${Math.round(k.buyShare * 100)}%"></i></div></div>
-      <div class="krc res"><div class="krh">★ KEY RESISTANCE (sellers’ line)</div>${lvl(k.res)}</div>
-      <div class="krc sup"><div class="krh">★ KEY SUPPORT (buyers’ line)</div>${lvl(k.sup)}</div>
+      <div class="krc res"><div class="krh">★ KEY RESISTANCE · ${k.tf}</div>${lvl(k.res)}</div>
+      <div class="krc sup"><div class="krh">★ KEY SUPPORT · ${k.tf}</div>${lvl(k.sup)}</div>
       <div class="krc wide ${k.leanCls}"><div class="krh">WHAT IT MEANS</div><div class="krl">${k.lean}</div><div class="krs">${k.brk}</div>${k.inside ? `<div class="krs y">⚑ Price is sitting ON a key zone ${fp(k.inside.p)} (${k.inside.src.slice(0, 3).join(', ')}) — expect a reaction here.</div>` : k.where ? `<div class="krs y">${k.where}</div>` : ''}</div>
     </div>`;
   }
