@@ -43,7 +43,9 @@ function buildPlan(dir, px, atr, sup, res, c) {
   else { entry = px; eType = 'market'; base = near[0] || null; }
   let stop = base ? (dir > 0 ? base.lo - atr * c.buf : base.hi + atr * c.buf) : entry - dir * atr * (c.minR + c.maxR) / 2;
   let risk = Math.abs(entry - stop);
-  if (risk < atr * c.minR) { stop = entry - dir * atr * c.minR; risk = atr * c.minR; }
+  // never so tight that fees exceed a quarter of the risk (a limit entry pays the lower maker fee on the way in)
+  const floor = Math.max(atr * c.minR, entry * (c.fee || 0) / 100 * (eType === 'limit' ? 0.7 : 1) / 0.25);
+  if (risk < floor) { stop = entry - dir * floor; risk = floor; }
   if (risk > atr * c.maxR) { stop = entry - dir * atr * c.maxR; risk = atr * c.maxR; }
   const tz = far.filter(z => dir > 0 ? z.lo > entry + risk * 0.8 : z.hi < entry - risk * 0.8);
   const edge = z => dir > 0 ? z.lo - atr * 0.05 : z.hi + atr * 0.05;
@@ -117,13 +119,16 @@ OF.tradePlan = function () {
   const k1r = OF.rsi(k1, 14), rsi = k1r[k1r.length - 1];
   fac('RSI 14 (1h)', 0.5, rsi > 75 ? -0.4 : rsi < 25 ? 0.4 : (rsi - 50) / 50, rsi.toFixed(1) + (rsi > 70 ? ' — stretched up, late to chase longs' : rsi < 30 ? ' — stretched down, late to chase shorts' : ''), 'Trend');
   if (M.va || M.vwap) fac('Value (VWAP / value area)', 1, ((M.va ? M.va.score : 0) + (M.vwap ? M.vwap.score : 0)) / (M.va && M.vwap ? 200 : 100), [M.va && M.va.text, M.vwap && M.vwap.text].filter(Boolean).join(' · '), 'Value');
-  if (dec) fac('Order flow now', 1, dec.score / 60, 'Decision engine ' + OF.label(dec.score) + ' ' + Math.round(Math.abs(dec.score)), 'Flow');
+  const perp = OF.edge.cfg().market === 'perp';
+  if (dec) fac('Order flow now', perp ? 0.8 : 1.2, dec.score / 60, 'Decision engine ' + OF.label(dec.score) + ' ' + Math.round(Math.abs(dec.score)), 'Flow');
   const dl = ['d1h', 'd4h'].map(k => M[k]).filter(x => x && x.score != null);
   if (dl.length) fac('Delta 1h + 4h candles', 1, dl.reduce((a, x) => a + x.score, 0) / dl.length / 100, dl.map(x => x.name + ' ' + x.text.split('·')[0]).join(' · '), 'Flow');
   // whales over the last 4h (what has been recorded)
   const wl = OF.whaleList('big', S.whaleThr || 1e9, now - 4 * 36e5); let wb = 0, ws = 0, wbp = 0, wsp = 0;
   for (const w of wl) { if (w.buy) { wb += w.n; wbp += w.n * w.p; } else { ws += w.n; wsp += w.n * w.p; } }
-  const recFrom = S.trades.length ? S.trades[0].t : now, recH = (now - recFrom) / 36e5;
+  const recFrom = Math.min(S.trades.length ? S.trades[0].t : now, S.recW && S.recW.length ? S.recW[0][0] : Infinity), recH = (now - recFrom) / 36e5;
+  { const ff = OF.fflow(now - 9e5); if (ff.tot) fac('Futures CVD (15 min)', perp ? 1.2 : 0.6, ff.d / ff.tot * 2.5, `${OF.fmtUsd(ff.d, true)} net of ${OF.fmtUsd(ff.tot)} traded on the perpetual`, 'Flow'); }
+  { const cv = OF.edge.cvdSpan(4 * 36e5); if (cv.tot) fac('Spot CVD (4h, recorded)', 0.8, cv.d / cv.tot * 3, `${OF.fmtUsd(cv.d, true)} net over ${cv.hours < 1 ? Math.round(cv.hours * 60) + ' min' : cv.hours.toFixed(1) + ' h'} recorded`, 'Flow'); }
   fac('Whales (4h window)', 1, (wb + ws) ? (wb - ws) / (wb + ws) : 0, `${OF.fmtUsd(wb - ws, true)} net from ${wl.length} prints ≥ ${OF.fmtUsd(S.whaleThr)}` + (recH < 4 ? ` (only ${recH < 1 ? Math.round(recH * 60) + ' min' : recH.toFixed(1) + ' h'} recorded so far)` : ''), 'Whales');
   if (M.walls) fac('Book liquidity ±0.5%', 0.5, M.walls.score / 100, M.walls.text, 'Liquidity');
   if (M.fake) fac('Fake walls', 0.4, M.fake.score / 100, M.fake.text, 'Liquidity');
@@ -133,9 +138,8 @@ OF.tradePlan = function () {
   OF.loadGamma(); const g = OF.gammaCalc({ days: 30 });
   if (g && g.flip) fac('Options gamma', 0.4, px > g.flip ? 0.3 : -0.3, (g.net < 0 ? 'negative gamma (moves extend)' : 'positive gamma (ranges hold)') + ` · price ${px > g.flip ? 'above' : 'below'} zero-gamma ${OF.fp(g.flip)}`, 'Options');
 
-  let sw = 0, sum = 0; for (const f of F) if (f.s != null) { sum += f.s * f.w; sw += f.w; }
-  const bias = sw ? sum / sw : 0;
-  const voting = F.filter(f => f.s != null && Math.abs(f.s) > 0.15), agree = voting.length ? voting.filter(f => Math.sign(f.s) === Math.sign(bias)).length / voting.length : 0;
+  // factors are grouped into four families (trend, order flow, leverage, liquidity) so price-derived readings are not counted several times
+  const cmb = OF.edge.combine(F), bias = cmb.bias, agree = cmb.agree, fams = cmb.fams;
 
   /* ---------- 2. levels ---------- */
   const lv = [];
@@ -150,10 +154,10 @@ OF.tradePlan = function () {
     if (S.day && S.day.prev.length) { let h = -Infinity, l = Infinity; for (const c of S.day.prev) { h = Math.max(h, c.h); l = Math.min(l, c.l); } add(h, 1.5, 'prev-day high'); add(l, 1.5, 'prev-day low'); }
   }
   if (S.synced) {
-    const bb = OF.bookBins(1.5, OF.niceStep(px * 0.0008)), walls = [];
-    for (const [p, n] of bb.b) walls.push({ p: p + bb.bin / 2, n, side: 'bid' }); for (const [p, n] of bb.a) walls.push({ p: p + bb.bin / 2, n, side: 'ask' });
+    const bb = OF.bookBinsAll(1.5, OF.niceStep(px * 0.0008)), walls = [];
+    for (const [p, n] of bb.b) walls.push({ p: p + bb.bin / 2, n, side: 'bid', v: bb.nv('bid', p) }); for (const [p, n] of bb.a) walls.push({ p: p + bb.bin / 2, n, side: 'ask', v: bb.nv('ask', p) });
     walls.sort((a, b) => b.n - a.n); const mx = walls.length ? walls[0].n : 1;
-    walls.slice(0, 8).forEach(w => add(w.p, 0.8 + 1.5 * w.n / mx, (w.side === 'bid' ? 'bid wall ' : 'ask wall ') + OF.fmtUsd(w.n)));
+    walls.slice(0, 8).forEach(w => add(w.p, (0.8 + 1.5 * w.n / mx) * (bb.venues > 1 ? (w.v > 1 ? 1.2 : 0.8) : 1), (w.side === 'bid' ? 'bid wall ' : 'ask wall ') + OF.fmtUsd(w.n) + (bb.venues > 1 ? ' on ' + w.v + ' venue' + (w.v > 1 ? 's' : '') : '')));
   }
   if (lm && lm.rows.length) {
     const rows = lm.rows.slice().sort((a, b) => (b.long + b.short) - (a.long + a.short)).slice(0, 6), mx = rows.length ? rows[0].long + rows[0].short : 1;
@@ -169,21 +173,25 @@ OF.tradePlan = function () {
   const rs = OF.niceStep(px * 0.01); add(Math.round(px / rs) * rs, 0.5, 'round number'); add((Math.round(px / rs) + 1) * rs, 0.5, 'round number'); add((Math.round(px / rs) - 1) * rs, 0.5, 'round number');
   const { zones, sup, res } = makeZones(lv, px, atr, 0.25);
   const strong = z => z.w >= 2.5;
-  const build = dir => buildPlan(dir, px, atr, sup, res, { near: 1.6, buf: 0.25, minR: 0.6, maxR: 2, tp1R: 1.5, tp1Cap: 4, tp2R: 3, tp2Cap: 6, step: 0.3 });
+  const build = dir => buildPlan(dir, px, atr, sup, res, { near: 1.6, buf: 0.25, minR: 0.6, maxR: 2, tp1R: 1.5, tp1Cap: 4, tp2R: 3, tp2Cap: 6, step: 0.3, fee: OF.edge.cfg().fee });
   const long = build(1), short = build(-1);
   let side = 0, why = [];
-  if (Math.abs(bias) >= 0.2 && agree >= 0.55) side = Math.sign(bias);
-  else why.push(Math.abs(bias) < 0.2 ? 'the factors cancel out (bias ' + (bias * 100).toFixed(0) + ')' : 'only ' + Math.round(agree * 100) + '% of factors agree');
+  if (cmb.ok) side = Math.sign(bias);
+  else why.push(Math.abs(bias) < 0.18 ? 'the factor families cancel out (bias ' + (bias * 100).toFixed(0) + ')' : cmb.famAgainst ? 'one factor family is strongly against the others' : 'only ' + cmb.famYes + ' of ' + cmb.famVoting + ' factor families agree (2 or more needed)');
   let plan = side > 0 ? long : side < 0 ? short : null;
   if (plan && plan.rr1 < 1.3) { why.push(`reward to the first target is only ${plan.rr1.toFixed(1)}R — a ${side > 0 ? 'resistance' : 'support'} zone sits too close`); plan = null; }
   if (plan && rsi > 78 && side > 0 && plan.eType === 'market') { why.push('1h RSI is above 78 — wait for the pullback limit instead of buying here'); plan.eType = 'limit'; }
   if (plan && rsi < 22 && side < 0 && plan.eType === 'market') { why.push('1h RSI is below 22 — wait for the bounce limit instead of selling here'); plan.eType = 'limit'; }
+  // market type, costs, then the sweep-and-reclaim setup if the zone setup did not qualify
+  const reg = OF.edge.regime(k1); long.costR = OF.edge.cost(long); short.costR = OF.edge.cost(short);
+  if (plan) { plan = OF.edge.gate(plan, reg, why); if (plan) plan.setup = 'zone'; }
+  if (!plan) { const sq = OF.edge.liveSweep(k1, px, zones, sup, res, atr, bias, OF.edge.cfg().fee), sg = sq && OF.edge.gate(sq, reg, [], { sweep: true }); if (sg) { plan = sg; side = sg.dir; } }
   const conf = Math.round(OF.clamp(Math.abs(bias) * 100 * 0.7 + agree * 40 + (plan && plan.base && strong(plan.base) ? 10 : 0), 0, 95));
   const ref = plan || (Math.abs(bias) > 0 ? (bias > 0 ? long : short) : long);
   const a1 = OF.atr(k1), lbl = 'last ' + Math.round(k1.length / 24) + ' days of 1h candles';
   const probL = backtest(k1, 1, long.risk / a1, long.rr1, long.rr2, 24, lbl), probS = backtest(k1, -1, short.risk / a1, short.rr1, short.rr2, 24, lbl);
   const prob = ref.dir > 0 ? probL : probS;
-  return { at: Date.now(), px, atr, atr4, bias, agree, factors: F, zones, sup, res, long, short, side: plan ? side : 0, plan, why, conf, rsi, recH, prob, probL, probS, trigTf: '1h',
+  return { at: Date.now(), px, atr, atr4, bias, agree, factors: F, zones, sup, res, long, short, side: plan ? side : 0, plan, why, conf, rsi, recH, prob, probL, probS, trigTf: '1h', fams, reg, cmb,
     verdict: plan ? (side > 0 ? 'LONG' : 'SHORT') : 'NO TRADE' };
 };
 
@@ -230,9 +238,7 @@ OF.swingPlan = function () {
   if (dm('fuel')) fac('Liquidation magnet', 0.8, M.fuel.score / 100, M.fuel.text, 'Futures');
   OF.loadGamma(); const g = OF.gammaCalc({ days: 30 });
   if (g && g.flip) fac('Options gamma', 0.5, px > g.flip ? 0.3 : -0.3, `price ${px > g.flip ? 'above' : 'below'} zero-gamma ${OF.fp(g.flip)} · call wall ${OF.fp(g.callWall)} · put wall ${OF.fp(g.putWall)}`, 'Options');
-  let sw = 0, sum = 0; for (const f of F) if (f.s != null) { sum += f.s * f.w; sw += f.w; }
-  const bias = sw ? sum / sw : 0, voting = F.filter(f => f.s != null && Math.abs(f.s) > 0.15);
-  const agree = voting.length ? voting.filter(f => Math.sign(f.s) === Math.sign(bias)).length / voting.length : 0;
+  const cmb = OF.edge.combine(F), bias = cmb.bias, agree = cmb.agree, fams = cmb.fams;
 
   // levels within ±15 %
   const lv = [], add = (p, w, src) => { if (p && isFinite(p) && Math.abs(p / px - 1) < 0.15) lv.push({ p, w, src }); };
@@ -246,7 +252,7 @@ OF.swingPlan = function () {
   if (S.synced) { const bb = OF.bookBins(3, OF.niceStep(px * 0.002)), ws = []; for (const [p, n] of bb.b) ws.push({ p: p + bb.bin / 2, n, s: 'bid' }); for (const [p, n] of bb.a) ws.push({ p: p + bb.bin / 2, n, s: 'ask' }); ws.sort((a, b) => b.n - a.n); ws.slice(0, 6).forEach(w => add(w.p, 0.6, w.s + ' wall ' + OF.fmtUsd(w.n))); }
   const rs = OF.niceStep(px * 0.02); for (let j = -3; j <= 3; j++) add((Math.round(px / rs) + j) * rs, 0.6, 'round number');
   const { zones, sup, res } = makeZones(lv, px, atr, 0.3);
-  const cfg = { near: 1.0, buf: 0.25, minR: 0.6, maxR: 1.8, tp1R: 1.5, tp1Cap: 4, tp2R: 3, tp2Cap: 6, step: 0.3 };
+  const cfg = { near: 1.0, buf: 0.25, minR: 0.6, maxR: 1.8, tp1R: 1.5, tp1Cap: 4, tp2R: 3, tp2Cap: 6, step: 0.3, fee: OF.edge.cfg().fee };
   const long = buildPlan(1, px, atr, sup, res, cfg), short = buildPlan(-1, px, atr, sup, res, cfg);
   const dir = bias >= 0 ? 1 : -1, pl = dir > 0 ? long : short;
   const sc = k => (M[k] && M[k].score != null ? M[k].score : 0) * dir, fund = S.fut.funding;
@@ -262,15 +268,17 @@ OF.swingPlan = function () {
     ['RSI not stretched in our direction', dir > 0 ? rsi < 72 : rsi > 28, 'daily RSI ' + rsi.toFixed(1), false]
   ].map(([name, ok, text, key]) => ({ name, ok, text, key }));
   const passed = CH.filter(c => c.ok).length, keyOk = CH.filter(c => c.key).every(c => c.ok);
-  const confirmed = passed >= 7 && keyOk && Math.abs(bias) >= 0.15 && pl.rr1 >= 1.2;
-  const why = confirmed ? [] : [`${passed}/9 checks pass` + (keyOk ? '' : ' and a key check fails')];
+  const base0 = passed >= 7 && keyOk && Math.abs(bias) >= 0.15 && cmb.famYes >= 2 && pl.rr1 >= 1.2;
+  const why = base0 ? [] : [`${passed}/9 checks pass` + (keyOk ? '' : ' and a key check fails') + (cmb.famYes < 2 ? ' · fewer than 2 factor families agree' : '')];
+  const reg = OF.edge.regime(kd); long.costR = OF.edge.cost(long); short.costR = OF.edge.cost(short);
+  const confirmed = !!(base0 && OF.edge.gate(pl, reg, why));
   const hist = kd.slice(0, -1);
   const lblD = 'last ' + (hist.length / 365).toFixed(1) + ' years of daily candles';
   const probL = backtest(hist, 1, long.risk / atr, long.rr1, long.rr2, 15, lblD), probS = backtest(hist, -1, short.risk / atr, short.rr1, short.rr2, 15, lblD);
   const prob = dir > 0 ? probL : probS;
   const conf = Math.round(OF.clamp(passed / 9 * 60 + Math.abs(bias) * 40, 0, 95));
   return { at: Date.now(), scalp: true, px, atr, bias, agree, factors: F, zones, sup, res, long, short, plan: confirmed ? pl : null, idea: pl, side: confirmed ? dir : 0,
-    checks: CH, passed, why, conf, prob, probL, probS, trigTf: 'daily', verdict: confirmed ? (dir > 0 ? 'LONG SWING' : 'SHORT SWING') : 'NO SWING' };
+    checks: CH, passed, why, conf, prob, probL, probS, trigTf: 'daily', fams, reg, cmb, verdict: confirmed ? (dir > 0 ? 'LONG SWING' : 'SHORT SWING') : 'NO SWING' };
 };
 
 /* ===================== TRADE PLAN TAB =====================
@@ -283,7 +291,8 @@ OF.swingPlan = function () {
 const FINAL = { stopped: 1, done: 1, breakeven: 1, missed: 1, expired: 1, closed: 1 };
 const MODES = { intraday: { name: 'Intraday 1h', exp: 4 * 36e5, expLabel: '4 h', stale: 12 * 36e5 }, swing: { name: 'Swing 1D', exp: 3 * 864e5, expLabel: '3 days', stale: 10 * 864e5 } };
 const dstr = t => new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ' ' + OF.hm(t);
-function newTrade(o, symbol, mode, src) {
+function newTrade(o, symbol, mode, src) { return OF.edge.decorate(newTrade0(o, symbol, mode, src), src); }
+function newTrade0(o, symbol, mode, src) {
   const t = OF.now(), riskUsd = (o.acct || 0) * (o.risk || 0) / 100, risk = Math.abs(src.entry - src.stop);
   return { id: t, symbol, mode, created: t, dir: src.dir, entry: src.entry, stop: src.stop, stopNow: src.stop, tp1: src.tp1, tp2: src.tp2 || src.tp1,
     rr1: Math.abs(src.tp1 - src.entry) / risk, rr2: Math.abs((src.tp2 || src.tp1) - src.entry) / risk, risk, eType: src.eType || 'manual',
@@ -299,17 +308,23 @@ function step(L, price, t) {
     else if (t > L.expires) { L.state = 'expired'; L.events.push([t, 'Not filled within ' + L.expLabel + ' — cancelled']); }
   } else if (L.state === 'active') {
     if (down(L.stopNow)) { L.state = 'stopped'; L.exitPx = L.stopNow; L.closedAt = t; L.events.push([t, 'Stop hit at ' + OF.fp(L.stopNow)]); }
-    else if (up(L.tp1)) { L.state = 'tp1'; L.stopNow = L.entry; L.events.push([t, 'TP1 hit — half closed, stop moved to entry']); }
+    else if (L.exit === 'tp2') { if (up(L.tp2)) { L.state = 'done'; L.closedAt = t; L.events.push([t, 'TP2 hit — full position closed']); } }
+    else if (up(L.tp1)) {
+      if (L.exit === 'tp1') { L.state = 'done'; L.closedAt = t; L.events.push([t, 'TP1 hit — full position closed']); }
+      else { L.state = 'tp1'; L.stopNow = L.entry; L.events.push([t, 'TP1 hit — half closed, stop moved to entry']); }
+    }
   } else if (L.state === 'tp1') {
     if (up(L.tp2)) { L.state = 'done'; L.closedAt = t; L.events.push([t, 'TP2 hit — trade complete']); }
     else if (down(L.stopNow)) { L.state = 'breakeven'; L.closedAt = t; L.events.push([t, 'Back to entry after TP1 — rest closed at breakeven']); }
   }
 }
-function resultR(L, px) {
+/* result in R, after fees (costR is the round-trip fee as a share of the risk; 0 on older trades) */
+function resultR(L, px) { const r = resultR0(L, px); return ['waiting', 'missed', 'expired'].includes(L.state) ? r : r - (L.costR || 0); }
+function resultR0(L, px) {
   const open = (p) => (p - L.entry) * L.dir / L.risk;
   switch (L.state) {
     case 'stopped': return L.stopNow === L.stop ? -1 : 0;
-    case 'done': return (L.rr1 + L.rr2) / 2;
+    case 'done': return L.exit === 'tp1' ? L.rr1 : L.exit === 'tp2' ? L.rr2 : (L.rr1 + L.rr2) / 2;
     case 'breakeven': return L.rr1 / 2;
     case 'missed': case 'expired': return 0;
     case 'closed': return L.halfOff ? L.rr1 / 2 + open(L.exitPx) / 2 : open(L.exitPx);
@@ -318,13 +333,26 @@ function resultR(L, px) {
     default: return 0;
   }
 }
+/* move one tracked trade (or journal signal) forward through every trade since it was last checked;
+   hours the page was closed are replayed from 1h candles, worst-case extreme first */
+function advance(L) {
+  const S = OF.S, tr = S.trades, first = tr.length ? tr[0].t : OF.now(), kh = S.k['1h'];
+  if (kh && L.lastT < first - 36e5) {
+    for (const c of kh) { if (c.t + 36e5 <= L.lastT || c.t >= first) continue; step(L, L.dir > 0 ? c.l : c.h, c.t + 36e5 - 1); if (FINAL[L.state]) break; step(L, L.dir > 0 ? c.h : c.l, c.t + 36e5 - 1); if (FINAL[L.state]) break; }
+    L.lastT = Math.max(L.lastT, first - 1);
+  }
+  for (let i = OF.lb(tr, L.lastT + 1); i < tr.length && !FINAL[L.state]; i++) step(L, tr[i].p, tr[i].t);
+  if (!FINAL[L.state] && L.state === 'waiting' && OF.now() > L.expires) step(L, S.last, OF.now());
+  L.lastT = tr.length ? tr[tr.length - 1].t : OF.now();
+}
+OF._pl = { step, advance, resultR, FINAL, MODES, makeZones, buildPlan, pivots };
 function statusOf(L, px) {
   const fp = OF.fp, dist = x => Math.abs(x / px - 1) * 100, side = L.dir > 0 ? 'BUY' : 'SELL', r = resultR(L, px);
   const pnl = `<b class="${r >= 0 ? 'g' : 'r'}">${r >= 0 ? '+' : ''}${r.toFixed(2)}R${L.riskUsd ? ' (' + OF.fmtUsd(r * L.riskUsd, true) + ')' : ''}</b>`;
   if (L.state === 'waiting') return { cls: 'wait', icon: '⏳', head: `WAITING — ${side} LIMIT at ${fp(L.entry)} not filled yet`, body: `Price ${fp(px)} is ${dist(L.entry).toFixed(2)}% ${px < L.entry ? 'below' : 'above'} the entry. Cancel at ${dstr(L.expires)} if not filled.` };
   if (L.state === 'active') return { cls: r >= 0 ? 'on' : 'risk', icon: '🟢', head: `OPEN — ${side} from ${fp(L.entry)}${L.filledAt ? ' since ' + dstr(L.filledAt) : ''} · now ${pnl}`, body: `Stop ${fp(L.stopNow)} (${dist(L.stopNow).toFixed(2)}% away) · TP1 ${fp(L.tp1)} (${dist(L.tp1).toFixed(2)}% away) · TP2 ${fp(L.tp2)}` };
   if (L.state === 'tp1') return { cls: 'on', icon: '✅', head: `TP1 HIT — half closed, stop at entry ${fp(L.entry)} · now ${pnl}`, body: `Runner is risk-free. TP2 ${fp(L.tp2)} is ${dist(L.tp2).toFixed(2)}% away.` };
-  const m = { stopped: ['❌', 'risk', 'STOPPED OUT'], done: ['🏁', 'on', 'COMPLETE — TP1 + TP2'], breakeven: ['➖', 'wait', 'CLOSED — TP1 + breakeven'], missed: ['↷', 'wait', 'MISSED — never filled'], expired: ['⌛', 'wait', 'EXPIRED — never filled'], closed: ['✋', r >= 0 ? 'on' : 'risk', 'CLOSED BY YOU at ' + fp(L.exitPx)] }[L.state];
+  const m = { stopped: ['❌', 'risk', 'STOPPED OUT'], done: ['🏁', 'on', L.exit === 'tp1' ? 'COMPLETE — full exit at TP1' : L.exit === 'tp2' ? 'COMPLETE — full exit at TP2' : 'COMPLETE — TP1 + TP2'], breakeven: ['➖', 'wait', 'CLOSED — TP1 + breakeven'], missed: ['↷', 'wait', 'MISSED — never filled'], expired: ['⌛', 'wait', 'EXPIRED — never filled'], closed: ['✋', r >= 0 ? 'on' : 'risk', 'CLOSED BY YOU at ' + fp(L.exitPx)] }[L.state];
   return { cls: m[1], icon: m[0], head: `${m[2]} · ${pnl}`, body: '' };
 }
 
@@ -363,7 +391,7 @@ OF.views.plan = {
   renderSub() {
     if (!this.subSeg || !this.T) return;
     const n = this.openT().length;
-    this.subSeg.innerHTML = ''; this.subSeg.appendChild(ui.seg('', [['open', `📂 My trades${n ? ' (' + n + ')' : ''}`], ['next', '✨ Next plan'], ['hist', '📜 History']], this.o.sub, v => { this.o.sub = v; this.save(); this.html(); }));
+    this.subSeg.innerHTML = ''; this.subSeg.appendChild(ui.seg('', [['open', `📂 My trades${n ? ' (' + n + ')' : ''}`], ['next', '✨ Next plan'], ['hist', '📜 History'], ['score', '📊 Scorecard']], this.o.sub, v => { this.o.sub = v; this.save(); this.html(); }));
   },
   applyFull() { if (this.root) this.root.classList.toggle('plfull', !!this.o.full); this.c && this.c.fit(); },
   mount(v) {
@@ -392,17 +420,7 @@ OF.views.plan = {
   /* follow every open trade through the trades (and 1h candles for time the page was closed) */
   trackAll() {
     const S = OF.S, tr = S.trades, first = tr.length ? tr[0].t : OF.now(), kh = S.k['1h']; let changed = false;
-    for (const L of this.openT()) {
-      const before = L.state;
-      if (kh && L.lastT < first - 36e5) {
-        for (const c of kh) { if (c.t + 36e5 <= L.lastT || c.t >= first) continue; step(L, L.dir > 0 ? c.l : c.h, c.t + 36e5 - 1); if (FINAL[L.state]) break; step(L, L.dir > 0 ? c.h : c.l, c.t + 36e5 - 1); if (FINAL[L.state]) break; }
-        L.lastT = Math.max(L.lastT, first - 1);
-      }
-      for (let i = OF.lb(tr, L.lastT + 1); i < tr.length && !FINAL[L.state]; i++) step(L, tr[i].p, tr[i].t);
-      if (!FINAL[L.state] && L.state === 'waiting' && OF.now() > L.expires) step(L, S.last, OF.now());
-      L.lastT = tr.length ? tr[tr.length - 1].t : OF.now();
-      if (L.state !== before) changed = true;
-    }
+    for (const L of this.openT()) { const before = L.state; advance(L); if (L.state !== before) changed = true; }
     if (changed || !this._sv || Date.now() - this._sv > 10000) { this.saveT(); this._sv = Date.now(); }
     if (changed) { this.renderSub(); this.lastHtml = 0; }
   },
@@ -412,6 +430,7 @@ OF.views.plan = {
     const S = OF.S; if (!S || !S.info || !S.last) return;
     if (!this.T || this.Tsym !== S.symbol) this.load();
     this.trackAll();
+    OF.edge.track();
     if (!this.o.auto) return;
     for (const mode of ['intraday', 'swing']) {
       const p = this.analysis(mode); if (!p || p.wait) continue;
@@ -421,6 +440,10 @@ OF.views.plan = {
       const cooling = lastAuto && FINAL[lastAuto.state] && OF.now() - (lastAuto.closedAt || lastAuto.created) < ms;
       const log = m => { (st.log = st.log || []).push([OF.now(), m]); if (st.log.length > 30) st.log.shift(); };
       const add = (q, why) => {
+        const rl = OF.edge.limits(this.T);
+        if (rl.block) { if (st.blk !== rl.block + st.lastClose) { st.blk = rl.block + st.lastClose; log('Setup found but not taken: ' + rl.block); } return; }
+        if (q.setup === 'sweep') st.sweepT = q.sweepT;
+        OF.edge.record(mode, p, q);
         const t = newTrade(this.o, S.symbol, mode, Object.assign({}, q, { conf: p.conf, prob: q.dir > 0 ? p.probL : p.probS }));
         t.auto = true; t.events.push([OF.now(), '🤖 ' + why]); this.T.push(t); this.saveT(); log('Auto trade created: ' + (q.dir > 0 ? 'LONG' : 'SHORT') + ' — ' + why);
         OF.notify(`🤖 Auto ${q.dir > 0 ? 'LONG' : 'SHORT'} ${MODES[mode].name} confirmed`, `${why}. ${q.eType === 'limit' ? 'Limit entry' : 'Entry'} ${OF.fp(q.entry)} · stop ${OF.fp(q.stop)} · TP1 ${OF.fp(q.tp1)} · TP2 ${OF.fp(q.tp2)}`);
@@ -428,16 +451,22 @@ OF.views.plan = {
       };
       if (st.lastClose == null) st.lastClose = last.t;            // first run: never fire on old candles
       else if (last.t > st.lastClose) {                            // a new candle has just closed
-        st.lastClose = last.t;
+        st.lastClose = last.t; OF.edge.record(mode, p);
         const arm = st.armed || { long: p.long.trigger, short: p.short.trigger };
         const dir = last.c > arm.long ? 1 : last.c < arm.short ? -1 : 0;
         if (!dir) log(`${tf} closed at ${OF.fp(last.c)} — inside ${OF.fp(arm.short)}–${OF.fp(arm.long)}, still waiting`);
         else if (open.length) log(`${tf} closed ${dir > 0 ? 'above' : 'below'} the trigger, but a trade is already open — skipped`);
         else if (cooling) log(`${tf} trigger hit, but the last auto trade just finished — waiting one candle`);
         else if (p.bias * dir < -0.3) log(`${tf} closed ${dir > 0 ? 'above' : 'below'} the trigger, but the analysis is strongly against — skipped`);
-        else add(dir > 0 ? p.long : p.short, `${tf} candle closed ${dir > 0 ? 'above' : 'below'} ${OF.fp(dir > 0 ? arm.long : arm.short)} at ${OF.fp(last.c)} — confirmed`);
+        else {   // false-breakout filter, then market type and costs
+          const fb = OF.edge.breakoutOK(k, dir, dir > 0 ? arm.long : arm.short), w2 = [];
+          const g2 = fb.ok ? OF.edge.gate(Object.assign({ setup: 'breakout' }, dir > 0 ? p.long : p.short), p.reg || { type: 'mixed' }, w2, { breakout: true }) : null;
+          if (!fb.ok) log(`${tf} break of ${OF.fp(dir > 0 ? arm.long : arm.short)} rejected — ${fb.why}`);
+          else if (!g2) log(`${tf} break rejected — ${w2[0]}`);
+          else add(g2, `${tf} candle ${fb.why} — confirmed`);
+        }
       }
-      if (p.plan && !this.openT().filter(t => t.mode === mode).length && !cooling) add(p.plan, 'analysis confirmed the setup (' + (p.scalp ? p.passed + '/9 checks' : Math.round(p.agree * 100) + '% of factors agree') + ')');
+      if (p.plan && !this.openT().filter(t => t.mode === mode).length && !cooling && !(p.plan.setup === 'sweep' && st.sweepT === p.plan.sweepT)) add(p.plan, (p.plan.setup === 'sweep' ? 'stops swept beyond ' + OF.fp(p.plan.base.p) + ' and price reclaimed it (' : 'analysis confirmed the setup (') + (p.scalp ? p.passed + '/9 checks' : (p.cmb ? p.cmb.famYes + ' of ' + p.cmb.famVoting + ' factor families agree' : Math.round(p.agree * 100) + '% agree')) + ')');
       st.armed = { long: p.long.trigger, short: p.short.trigger, at: Date.now() };
       st.nextClose = k[k.length - 1].t + ms;
       LS.set(this.autoKey(mode), st);
@@ -450,6 +479,7 @@ OF.views.plan = {
     let lines;
     if (!this.o.auto) lines = [['#9ca3af', '🤖 Auto is OFF — turn it on in the toolbar to confirm and track trades automatically']];
     else if (open.length) { const L = open[open.length - 1], stt = statusOf(L, S.last); lines = [[L.state === 'waiting' ? C.amber : C.buy, `${L.state === 'waiting' ? '⏳ CONFIRMED — waiting for entry fill' : '✅ CONFIRMED — trade open'} · #${open.length} ${L.dir > 0 ? 'LONG' : 'SHORT'}${L.auto ? ' (auto)' : ''}`], ['#cbd5e1', stt.head.replace(/<[^>]+>/g, '')]]; }
+    else if (p.plan && OF.edge.limits(this.T).block) lines = [[C.sell, '🛑 SETUP FOUND — NOT TAKEN'], ['#cbd5e1', OF.edge.limits(this.T).block]];
     else if (p.plan) lines = [[C.buy, '✅ CONFIRMED by the analysis — creating the trade…']];
     else lines = [[C.amber, `⏳ WAITING FOR CONFIRMATION — next ${tf} close in ${mm}`], [C.buy, `LONG if it closes above ${OF.fp(p.long.trigger)} (${((p.long.trigger / S.last - 1) * 100).toFixed(2)}%)`], [C.sell, `SHORT if it closes below ${OF.fp(p.short.trigger)} (${((p.short.trigger / S.last - 1) * 100).toFixed(2)}%)`]];
     const lg = (st.log || []).slice(-1)[0]; if (lg && this.o.auto) lines.push(['#9ca3af', 'last: ' + OF.hm(lg[0]) + ' ' + lg[1]]);
@@ -503,7 +533,7 @@ OF.views.plan = {
         return `<div class="trd ${st.cls}" data-id="${L.id}">
           <div class="trh">${pill(L.dir)} <b>${L.symbol}</b> <span class="muted sm">${MODES[L.mode] ? MODES[L.mode].name : L.mode} · tracked ${dstr(L.created)}</span><span class="trb"><button data-a="mode" title="Move this trade to the other mode (which chart it shows on)">↔ make ${L.mode === 'swing' ? 'Intraday' : 'Swing'}</button><button data-a="close">✋ I closed it (at ${fp(px)})</button><button data-a="del" title="Remove from the list">🗑</button></span></div>
           <div class="plstatus ${st.cls}"><span class="pli">${st.icon}</span><div><div class="plsh">${st.head}</div><div class="plsb">${st.body}</div></div></div>
-          <div class="trn mono"><span>Entry <b>${fp(L.entry)}</b></span><span class="r">Stop <b>${fp(L.stopNow)}</b>${L.stopNow !== L.stop ? ' (moved)' : ''}</span><span class="g">TP1 <b>${fp(L.tp1)}</b></span><span class="g">TP2 <b>${fp(L.tp2)}</b></span><span>Size <b>${L.qty ? (L.qty < 1 ? L.qty.toFixed(4) : L.qty.toFixed(3)) + ' ' + S.info.base : '—'}</b></span></div>
+          <div class="trn mono"><span>Entry <b>${fp(L.entry)}</b></span><span class="r">Stop <b>${fp(L.stopNow)}</b>${L.stopNow !== L.stop ? ' (moved)' : ''}</span><span class="g">TP1 <b>${fp(L.tp1)}</b></span><span class="g">TP2 <b>${fp(L.tp2)}</b></span><span>Size <b>${L.qty ? (L.qty < 1 ? L.qty.toFixed(4) : L.qty.toFixed(3)) + ' ' + S.info.base : '—'}</b></span><span class="muted">Exit: ${L.exit === 'tp1' ? 'all at TP1' : L.exit === 'tp2' ? 'all at TP2' : 'half at TP1'}${L.setup && L.setup !== 'zone' ? ' · ' + L.setup + ' setup' : ''}${L.costR ? ' · fees ' + L.costR.toFixed(2) + 'R' : ''}</span></div>
           <div class="hl ${h.cls}"><div class="hlv">Health check: <b>${h.v}</b> — ${h.act || ''}</div>${h.items.map(([c, t]) => `<div class="hli ${c}">${c === 'ok' ? '✓' : c === 'bad' ? '✗' : '!'} ${t}</div>`).join('')}<div class="muted sm">Re-checked every 15 s against the latest ${MODES[L.mode] ? MODES[L.mode].name : ''} analysis and key points. Rules, not advice — you decide.</div></div>
           ${L.events.length ? `<div class="plev">${L.events.slice(-4).map(e => `<span>${dstr(e[0])} · ${e[1]}</span>`).join('')}</div>` : ''}</div>`;
       };
@@ -525,6 +555,9 @@ OF.views.plan = {
         if (!(src.entry > 0 && src.stop > 0 && src.tp1 > 0) || (src.entry - src.stop) * dir <= 0 || (src.tp1 - src.entry) * dir <= 0) { f.querySelector('.err').textContent = 'Check the numbers: for a long, stop below entry and TP above; for a short, the opposite.'; return; }
         this.T.push(newTrade(o, S.symbol, f.querySelector('[name=mode]').value, src)); this.saveT(); f.open = false; this.html();
       };
+    } else if (sub === 'score') {
+      const fresh = this._lastSub !== 'score' || !main.querySelector('#scStats'); this._lastSub = 'score';
+      OF.edge.scoreHtml(main, fresh, this);
     } else if (sub === 'hist') {
       this._lastSub = 'hist';
       const done = this.T.filter(t => FINAL[t.state]).sort((a, b) => (b.closedAt || b.created) - (a.closedAt || a.created));
@@ -548,14 +581,14 @@ OF.views.plan = {
     // 2) the next plan
     const pl = p.plan;
     let head, body, cls = 'wait', icon = '⏳';
-    if (pl) { cls = 'on'; icon = '✨'; head = `NEXT PLAN: ${pl.dir > 0 ? 'LONG' : 'SHORT'} ${pl.eType === 'limit' ? 'limit at ' + fmt(pl.entry) : 'at market ' + fmt(pl.entry)}`; body = `Stop ${fmt(pl.stop)} · TP1 ${fmt(pl.tp1)} (${pl.rr1.toFixed(1)}R) · TP2 ${fmt(pl.tp2)} (${pl.rr2.toFixed(1)}R). ${this.o.auto ? '🤖 Auto is ON — it will be tracked automatically within seconds.' : 'Levels keep updating until you press <b>Track this plan</b>, which freezes them and adds the trade to My trades.'}`; }
+    if (pl) { cls = 'on'; icon = '✨'; head = `NEXT PLAN${pl.setup === 'sweep' ? ' (sweep and reclaim)' : ''}: ${pl.dir > 0 ? 'LONG' : 'SHORT'} ${pl.eType === 'limit' ? 'limit at ' + fmt(pl.entry) : 'at market ' + fmt(pl.entry)}`; body = `Stop ${fmt(pl.stop)} · TP1 ${fmt(pl.tp1)} (${pl.rr1.toFixed(1)}R) · TP2 ${fmt(pl.tp2)} (${pl.rr2.toFixed(1)}R). ${this.o.auto ? '🤖 Auto is ON — it will be tracked automatically within seconds.' : 'Levels keep updating until you press <b>Track this plan</b>, which freezes them and adds the trade to My trades.'}`; }
     else if (p.scalp) { const rb = rankIdeas(p)[0]; head = `NO CONFIRMED SWING — ${p.passed}/9 checks pass`; body = `Missing: ${p.checks.filter(c => !c.ok).map(c => c.name).join(' · ')}. Do nothing yet. <b>More likely next: ${rb.q.dir > 0 ? 'LONG' : 'SHORT'}</b> — ${rb.why.join(', ')}. Both ideas are drawn on the chart.${rankIdeas(p).bothBad ? ' <b class="y">Both ideas have lost money at these levels in the past (win % below break-even) — waiting is the better choice.</b>' : ''}`; }
     else { const rb = rankIdeas(p)[0]; head = 'NO TRADE right now'; body = `${p.why.join('; ')}. Watch for a 1h close above <b>${fmt(p.long.trigger)}</b> (long idea) or below <b>${fmt(p.short.trigger)}</b> (short idea). <b>More likely next: ${rb.q.dir > 0 ? 'LONG' : 'SHORT'}</b> — ${rb.why.join(', ')}. Both ideas are drawn on the chart.${rankIdeas(p).bothBad ? ' <b class="y">Both ideas have lost money at these levels in the past (win % below break-even) — waiting is the better choice.</b>' : ''}`; }
     const pr = p.prob;
-    const probHtml = !pr ? '' : !pr.decided ? `<div class="plcard"><div class="plh"><b>Win probability</b></div><div class="muted sm">No similar setups found in the ${pr.label}.</div></div>` : (() => {
+    const probHtml = !pr ? '' : !pr.decided ? `<div class="plcard"><div class="plh"><b>Simple trend signal</b></div><div class="muted sm">No similar setups found in the ${pr.label}.</div></div>` : (() => {
       const w = Math.round(pr.win * 100), be = Math.round(pr.be * 100), edge = w - be, c = edge >= 5 ? 'g' : edge >= 0 ? 'y' : 'r';
-      return `<div class="plcard prob"><div class="plh"><b>Win probability (TP1 before stop)</b><span class="muted sm">measured, not guessed</span></div><div class="pbig ${c}">${w}%</div><div class="pbar"><i style="width:${w}%"></i><b style="left:${be}%"></b></div>
-        <div class="muted sm">From <b>${pr.decided}</b> similar setups in the ${pr.label}${pr.decided < 30 ? ' — <span class="y">small sample</span>' : ''}. Break-even needs <b>${be}%</b> → edge <b class="${c}">${edge >= 0 ? '+' : ''}${edge}%</b>. Average ${pr.exp >= 0 ? '+' : ''}${pr.exp.toFixed(2)}R per setup.</div></div>`; })();
+      return `<div class="plcard prob"><div class="plh"><b>Simple trend signal: TP1 before stop</b><span class="muted sm">rough guide only</span></div><div class="pbig ${c}">${w}%</div><div class="pbar"><i style="width:${w}%"></i><b style="left:${be}%"></b></div>
+        <div class="muted sm">A moving-average signal with this plan’s stop and target sizes, not the plan’s own rules (those are in the Rules backtest). <b>${pr.decided}</b> cases in the ${pr.label}${pr.decided < 30 ? ' — <span class="y">small sample</span>' : ''}. Break-even needs <b>${be}%</b> → edge <b class="${c}">${edge >= 0 ? '+' : ''}${edge}%</b>. Average ${pr.exp >= 0 ? '+' : ''}${pr.exp.toFixed(2)}R per setup.</div></div>`; })();
     const checksHtml = p.scalp ? `<div class="plcard checks"><div class="plh"><b>Confirmation checks ${p.passed}/9</b><span class="muted sm">★ = must pass</span></div>${p.checks.map(c => `<div class="chk ${c.ok ? 'ok' : 'no'}"><span>${c.ok ? '✓' : '✗'}</span><b>${c.name}${c.key ? ' ★' : ''}</b><span class="muted sm">${c.text}</span></div>`).join('')}</div>` : '';
     const ranks = pl ? null : rankIdeas(p), rk = q => ranks && ranks.find(r => r.q === q);
     const planCard = (q, main) => {
@@ -565,13 +598,13 @@ OF.views.plan = {
       ${r ? `<div class="trig">Starts only after a ${p.trigTf} candle <b>closes ${q.dir > 0 ? 'above' : 'below'} ${fmt(q.trigger)}</b> <span class="muted">(${r.trig.toFixed(2)}% away)</span><div class="muted sm">${r.why.join(' · ')}</div></div>` : ''}
       <div class="plrow"><span>Entry</span><b class="mono">${fmt(q.entry)}</b><span class="muted sm">${pct(q.entry)}${q.base ? ' · ' + q.base.src.slice(0, 2).join(', ') : ''}</span></div>
       <div class="plrow"><span class="r">Stop loss</span><b class="mono r">${fmt(q.stop)}</b><span class="muted sm">risk ${fmt(q.risk)}</span></div>
-      <div class="plrow"><span class="g">TP1</span><b class="mono g">${fmt(q.tp1)}</b><span class="muted sm">${q.rr1.toFixed(1)}R — half off, stop to entry</span></div>
+      <div class="plrow"><span class="g">TP1</span><b class="mono g">${fmt(q.tp1)}</b><span class="muted sm">${q.rr1.toFixed(1)}R · ${(q.rr1 - (q.costR || 0)).toFixed(1)}R after fees</span></div>
       <div class="plrow"><span class="g">TP2</span><b class="mono g">${fmt(q.tp2)}</b><span class="muted sm">${q.rr2.toFixed(1)}R</span></div>
       ${!main && pr && pr.decided ? `<div class="plrow"><span>Win %</span><b class="mono ${pr.win - pr.be >= 0.05 ? 'g' : pr.win >= pr.be ? 'y' : 'r'}">${Math.round(pr.win * 100)}%</b><span class="muted sm">needs ${Math.round(pr.be * 100)}% · ${pr.decided} past setups</span></div>` : ''}
       ${main ? `<div class="plrow"><span>Size</span><b class="mono">${qty < 1 ? qty.toFixed(4) : qty.toFixed(3)} ${S.info.base}</b><span class="muted sm">loses ${OF.fmtUsd(o.acct * o.risk / 100)} at the stop</span></div><button class="trackbtn">✔ Track this plan (I am taking it)</button>`
         : `<button class="trackany" data-d="${q.dir}">Track anyway — not confirmed (${qty < 1 ? qty.toFixed(4) : qty.toFixed(3)} ${S.info.base})</button>`}</div>`; };
-    main.innerHTML = pre + `<div class="plstatus ${cls}"><span class="pli">${icon}</span><div><div class="plsh">${head}</div><div class="plsb">${body}</div></div></div>
-      <div class="plcards">${probHtml}${checksHtml}</div><div class="plcards">${pl ? planCard(pl, true) + planCard(pl.dir > 0 ? p.short : p.long, false) : planCard(p.long, false) + planCard(p.short, false)}</div>`;
+    main.innerHTML = pre + OF.edge.limitsHtml(this.T) + `<div class="plstatus ${cls}"><span class="pli">${icon}</span><div><div class="plsh">${head}</div><div class="plsb">${body}</div></div></div>
+      ${OF.edge.contextHtml(p)}<div class="plcards">${probHtml}${OF.edge.btCard(pl)}${checksHtml}</div><div class="plcards">${pl ? planCard(pl, true) + planCard(pl.dir > 0 ? p.short : p.long, false) : planCard(p.long, false) + planCard(p.short, false)}</div>`;
     const g = main.querySelector('.goopen'); if (g) g.onclick = e => { e.preventDefault(); this.o.sub = 'open'; this.save(); this.html(); };
     const tb = main.querySelector('.trackbtn');
     if (tb) tb.onclick = () => { this.T.push(newTrade(o, S.symbol, o.mode, Object.assign({}, pl, { conf: p.conf, prob: p.prob }))); this.saveT(); this.o.sub = 'open'; this.save(); this.html(); };
@@ -582,7 +615,7 @@ OF.views.plan = {
     const zl = z => `<div class="zr"><b class="mono">${fmt(z.p)}</b><span class="zw" style="width:${Math.min(60, z.w * 9)}px"></span><span class="muted sm">${z.src.join(' · ')}</span></div>`;
     side.innerHTML = `<div class="sh">Resistance above</div>${p.res.slice(0, 7).map(zl).join('') || '<div class="muted pad">none</div>'}<div class="zr now"><b class="mono">${fmt(p.px)}</b><span class="muted sm">price now</span></div><div class="sh">Support below</div>${p.sup.slice(0, 7).map(zl).join('') || '<div class="muted pad">none</div>'}`;
     const groups = [...new Set(p.factors.map(f => f.group))];
-    fac.innerHTML = '<h3>What the analysis is based on (live)</h3><table class="tbl"><thead><tr><th>Factor</th><th>Weight</th><th>Vote</th><th>Reading</th></tr></thead><tbody>' + groups.map(gp => p.factors.filter(f => f.group === gp).map(f => { const v = f.s == null ? '—' : f.s > 0.15 ? '<b class="g">▲ long</b>' : f.s < -0.15 ? '<b class="r">▼ short</b>' : '<span class="muted">neutral</span>'; return `<tr><td>${f.name}</td><td class="mono muted">${f.w}</td><td>${v}</td><td class="wrap">${f.text}</td></tr>`; }).join('')).join('') + '</tbody></table>';
+    fac.innerHTML = '<h3>What the analysis is based on (live)</h3><table class="tbl"><thead><tr><th>Factor</th><th>Family</th><th>Weight</th><th>Vote</th><th>Reading</th></tr></thead><tbody>' + groups.map(gp => p.factors.filter(f => f.group === gp).map(f => { const v = f.s == null ? '—' : f.s > 0.15 ? '<b class="g">▲ long</b>' : f.s < -0.15 ? '<b class="r">▼ short</b>' : '<span class="muted">neutral</span>'; const lm = (OF.edge.mults() || {})[f.name]; return `<tr><td>${f.name}</td><td class="muted">${OF.edge.FAMNAME[f.fam] || ''}</td><td class="mono muted">${f.w}${lm ? ' ×' + lm.toFixed(2) : ''}</td><td>${v}</td><td class="wrap">${f.text}</td></tr>`; }).join('')).join('') + '</tbody></table>';
   },
   reading() {
     const n = this.T ? this.openT().length : 0, p = this.an[this.o.mode];
@@ -739,13 +772,13 @@ OF.keyRead = function (tfArg) {
   const mt = OF.mtf(), T = {}; if (mt) for (const r of mt.rows) T[r.tf] = r.score;
   const lv = [], add = (p, w, src, fake) => { if (p && isFinite(p) && Math.abs(p / px - 1) < cf.rng) lv.push({ p, w, src, fake }); };
   if (S.synced) {
-    const bb = OF.bookBins(cf.wallPct, OF.niceStep(px * cf.wallBin)), ws = [];
-    for (const [p, n] of bb.b) ws.push({ p: p + bb.bin / 2, n, side: 'bid' }); for (const [p, n] of bb.a) ws.push({ p: p + bb.bin / 2, n, side: 'ask' });
+    const bb = OF.bookBinsAll(cf.wallPct, OF.niceStep(px * cf.wallBin)), ws = [];
+    for (const [p, n] of bb.b) ws.push({ p: p + bb.bin / 2, n, side: 'bid', v: bb.nv('bid', p) }); for (const [p, n] of bb.a) ws.push({ p: p + bb.bin / 2, n, side: 'ask', v: bb.nv('ask', p) });
     ws.sort((a, b) => b.n - a.n); const mx = ws.length ? ws[0].n : 1;
     for (const w of ws.slice(0, 10)) {
-      const st = wallStand(w.p), pu = pullsNear(w.p, bb.bin * 1.5), fake = pu >= 3;
-      let wt = (1 + 2 * w.n / mx) * cf.wallW; if (st > 120) wt *= 1.3; if (fake) wt *= 0.4;
-      add(w.p, wt, `${w.side} wall ${OF.fmtUsd(w.n)}${fake ? ' ⚠ pulled ' + pu + '×' : st > 60 ? ' · ' + (st < 120 ? Math.round(st) + 's' : Math.round(st / 60) + 'm') + ' old' : ''}`, fake);
+      const st = Math.max(wallStand(w.p), OF.edge.wallAge(w.p)), pu = pullsNear(w.p, bb.bin * 1.5), fake = pu >= 3;
+      let wt = (1 + 2 * w.n / mx) * cf.wallW; if (st > 120) wt *= 1.3; if (fake) wt *= 0.4; if (bb.venues > 1) wt *= w.v > 1 ? 1.2 : 0.8;
+      add(w.p, wt, `${w.side} wall ${OF.fmtUsd(w.n)}${bb.venues > 1 && w.v > 1 ? ' on ' + w.v + ' venues' : ''}${fake ? ' ⚠ pulled ' + pu + '×' : st > 60 ? ' · ' + (st < 120 ? Math.round(st) + 's' : Math.round(st / 60) + 'm') + ' old' : ''}`, fake);
     }
   }
   if (ss) {

@@ -32,7 +32,7 @@ A single-page terminal that runs entirely in your browser from free public excha
 To update later, upload the changed files again; Pages redeploys automatically.
 
 ## Good to know
-- History for the heatmap, L3 events and live whales starts when you open the page and lives only in your browser; refreshing clears it. Candles, profiles and TPO load history from the exchange.
+- History for the heatmap and L3 events starts when you open the page; refreshing clears it. Whale prints and CVD for the last 8 hours are saved in your browser and survive a refresh. Candles, profiles and TPO load history from the exchange.
 - Pulls, icebergs, spoofing and liquidation clusters are inferred from public data, so treat them as context.
 - If Binance is blocked on your network the header shows OFFLINE; try another network or the demo.
 - Nothing here is financial advice.
@@ -48,6 +48,21 @@ Combines 12 factors (4h and 1h trend, 1h structure, RSI, VWAP/value area, live o
 
 **Win probability** (both modes) is measured, not guessed: the same setup type is replayed on past candles (~2.7 years of daily candles for swings, ~40 days of 1h for intraday) and it reports how often TP1 was hit before the stop, the sample size, the break-even rate for the plan's targets and the average result in R. Order-book checks can't be replayed (no book history), so it is a base rate.
 
+## Rules, measurement and limits (Trade plan → 📊 Scorecard)
+- **Factor families:** the factors are grouped into Trend, Order flow, Leverage and Liquidity. A direction needs at least 2 families agreeing, 60% of the voting families, and none strongly against. This stops price-derived readings being counted several times.
+- **Market type:** each plan is checked against the 1h (or daily) market type. Trend: only trades with the trend. Range: only limits at strong zone edges and sweeps. Chaos (candles over 2.5× normal size): no new trades.
+- **Costs:** round-trip fees (set in Rules and limits; 0.1% for perpetuals, 0.2% for spot by default) are taken off every R figure. A plan is rejected when fees exceed 25% of the risk or the first target pays under 1.2R after fees.
+- **Breakout filter:** a 1h close beyond a trigger only counts when it clears the level by 0.15 ATR, on at least 1.2× average volume, with candle delta in the same direction.
+- **Sweep and reclaim:** a second setup. Price runs through a strong zone by 0.1 ATR or more and closes back inside with a long wick; entry is at market with the stop beyond the sweep.
+- **Rules backtest:** replays the candle-based rules on about 6 months of 1h candles, after fees, split into an older 60% and a recent 40%. The exit rule (half at TP1 / all at TP1 / all at TP2) is chosen on the older part; the recent part shows how it held up. Order-book, futures, options and whale readings are not in it.
+- **Signal journal:** one signal is recorded at each 1h and daily close, and each time a trade is created, with every factor reading. It is followed to its stop or targets. The Scorecard shows results for confirmed and unconfirmed signals and which factors helped.
+- **Learned weights:** after 100 finished signals (then every 50 more) factor weights move between 0.5× and 1.5× according to the journal. Can be switched off.
+- **Risk limits:** daily loss limit in R, maximum trades per day, trading hours, and half size when Danger is high. Auto does not open trades while a limit is active.
+- **More data:** walls are cross-checked against Bybit and OKX spot books, futures CVD (Bybit perpetual) is a factor, and whale prints, per-minute CVD and wall ages for the last 8 hours survive a page refresh.
+
+The code for all of this is in `js/edge.js`.
+
 ## Where to tune things
 - `js/metrics.js` → `WEIGHTS` and `OF.verdictFrom()` decide how the Decision panel turns meters into BUY / SELL / WAIT.
 - `js/core.js` → `housekeeping()` sets the adaptive whale size (99.5th percentile) and L3 size floor.
+- `js/edge.js` → `E.combine()` (family agreement), `E.regime()` (market type), `E.gate()` (cost and market-type rules), `E.breakoutOK()`, `E.detectSweep()`.

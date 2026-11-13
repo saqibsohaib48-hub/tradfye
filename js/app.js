@@ -61,7 +61,7 @@ function updateHeader() {
   $('qAgo').textContent = ago > 30 ? 'last trade ' + (ago < 120 ? Math.round(ago) + 's' : Math.round(ago / 60) + 'm') + ' ago' : '';
   const k = S.k[A.tf], c = k && k[k.length - 1];
   $('stCandle').innerHTML = c ? `${A.tf} candle Δ <b class="${2 * c.bv - c.v >= 0 ? 'g' : 'r'}">${(2 * c.bv - c.v).toFixed(c.v < 10 ? 3 : 1)} ${S.info.base}</b>` : '';
-  $('stCvd').innerHTML = `CVD <b class="${S.cvd >= 0 ? 'g' : 'r'}">${OF.fmtUsd(S.cvd)}</b>`;
+  $('stCvd').innerHTML = `CVD <b class="${S.cvd >= 0 ? 'g' : 'r'}">${OF.fmtUsd(S.cvd)}</b>` + (S.fut.available ? ` <span title="Perpetual-futures CVD (Bybit) since the page opened">perp <b class="${S.fcvd >= 0 ? 'g' : 'r'}">${OF.fmtUsd(S.fcvd)}</b></span>` : '');
   const ss = OF.session(); $('stPoc').innerHTML = ss && ss.today ? `POC <b class="y">${OF.fp(ss.today.poc)}</b>` : '';
   document.title = OF.fp(S.last) + ' · ' + S.symbol + ' · FlowDesk';
 }
@@ -244,8 +244,9 @@ OF.startDemo = function (S) {
   OF.loadDay();
 };
 OF.demoKlines = tf => {
-  const ms = OF.tfMs[tf], n = 600, out = []; let p = 75500; const now = Math.floor(OF.now() / ms) * ms;
-  for (let i = n; i > 0; i--) { const o = p; p += (Math.random() - 0.48) * 75000 * Math.sqrt(ms / 6e4) * 0.0005; const h = Math.max(o, p) + Math.random() * 20, l = Math.min(o, p) - Math.random() * 20, v = 5 + Math.random() * 40; const qv = v * p; out.push({ t: now - i * ms, o, h, l, c: p, v, qv, bv: v * (0.4 + Math.random() * 0.2), bqv: qv * (0.4 + Math.random() * 0.2) }); }
+  const ms = OF.tfMs[tf], n = tf === '1h' ? 1500 : 600, out = []; let p = 75500; const now = Math.floor(OF.now() / ms) * ms;
+  const sc = 75000 * Math.sqrt(ms / 6e4) * 0.0011; let drift = 0;
+  for (let i = n; i > 0; i--) { if (i % 40 === 0) drift = (Math.random() - 0.5) * 0.5; const o = p, st = (Math.random() - 0.5 + drift * 0.3) * sc; p += st; const h = Math.max(o, p) + Math.random() * sc * 0.35, l = Math.min(o, p) - Math.random() * sc * 0.35, v = 5 + Math.random() * 40, qv = v * p, bs = OF.clamp(0.5 + st / sc * 0.25 + (Math.random() - 0.5) * 0.15, 0.2, 0.8); out.push({ t: now - i * ms, o, h, l, c: p, v, qv, bv: v * bs, bqv: qv * bs }); }
   return out;
 };
 

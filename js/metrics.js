@@ -14,6 +14,28 @@ OF.bookBins = function (pct, bin) {
 };
 
 /* Nearest significant wall on each side and how long it has been standing. */
+/* Same bins with the other venues' books added. v = how many venues hold a real share (≥ 15 %) of each bin. */
+OF.bookBinsAll = function (pct, bin) {
+  const S = OF.S, base = OF.bookBins(pct, bin), mid = base.mid, lo = mid * (1 - pct / 100), hi = mid * (1 + pct / 100);
+  const per = new Map(), note = (k, i, n) => { let a = per.get(k); if (!a) per.set(k, a = [0, 0, 0]); a[i] += n; };
+  for (const [p, n] of base.b) note('b' + p, 0, n); for (const [p, n] of base.a) note('a' + p, 0, n);
+  let idx = 0, venues = 1;
+  for (const name of ['bybit', 'okx']) {
+    idx++; const bk = S.xbook && S.xbook[name]; if (!bk || Date.now() - bk.at > 20000) continue; venues++;
+    for (const [p, q] of bk.bids) if (p >= lo && p < mid) { const k = Math.floor(p / base.bin) * base.bin; base.b.set(k, (base.b.get(k) || 0) + p * q); note('b' + k, idx, p * q); }
+    for (const [p, q] of bk.asks) if (p <= hi && p > mid) { const k = Math.floor(p / base.bin) * base.bin; base.a.set(k, (base.a.get(k) || 0) + p * q); note('a' + k, idx, p * q); }
+  }
+  base.venues = venues;
+  base.nv = (side, p) => { const a = per.get((side === 'bid' ? 'b' : 'a') + p); if (!a) return 1; const t = a[0] + a[1] + a[2]; return a.filter(x => x >= t * 0.15).length; };
+  return base;
+};
+/* Perpetual-futures trade flow (Bybit) since a time. */
+OF.fflow = function (from) {
+  const f = OF.S.futFlow; let b = 0, s = 0;
+  for (let i = f.length - 1; i >= 0 && f[i].t >= from; i--) { if (f[i].buy) b += f[i].n; else s += f[i].n; }
+  return { b, s, tot: b + s, d: b - s };
+};
+
 OF.walls = function (pct) {
   const S = OF.S; if (!S || !S.synced || !S.bin) return null;
   const { b, a, mid, bin } = OF.bookBins(pct || 0.25, S.bin);
@@ -48,7 +70,11 @@ OF.whaleList = function (mode, thr, from) {
     return out;
   }
   const tr = S.trades, i0 = OF.lb(tr, from);
-  if (mode === 'big') { for (let i = i0; i < tr.length; i++) if (tr[i].n >= thr) out.push(tr[i]); return out; }
+  if (mode === 'big') {
+    // whales saved before the last refresh come first, then the live ones
+    const t0 = tr.length ? tr[0].t : Infinity; for (const w of S.recW || []) if (w[0] < t0 && w[0] >= from && w[2] >= thr) out.push({ t: w[0], p: w[1], n: w[2], buy: !!w[3], q: w[2] / w[1] });
+    for (let i = i0; i < tr.length; i++) if (tr[i].n >= thr) out.push(tr[i]); return out;
+  }
   const win = mode === 'sweep' ? 0 : 1000;
   let g = null;
   const flush = () => { if (g && g.n >= thr && (mode !== 'sweep' || g.px.size > 1)) out.push({ t: g.t, p: g.pq / g.n, n: g.n, buy: g.buy }); };
@@ -301,6 +327,7 @@ OF.meters = function () {
     let lq = 0, sq = 0; for (const l of S.liqs) if (l.t >= now - 3600000) { if (l.side === 'long') lq += l.n; else sq += l.n; }
     add('fut', 'liq', 'Liquidations (1 h)', (lq + sq) ? (sq - lq) / (lq + sq) * 80 : null, (lq + sq) ? OF.fmtUsd(lq) + ' longs · ' + OF.fmtUsd(sq) + ' shorts' : 'None seen yet');
     let fb = 0, fs = 0; for (let i = S.futFlow.length - 1; i >= 0 && S.futFlow[i].t >= now - 60000; i--) { const x = S.futFlow[i]; if (x.buy) fb += x.n; else fs += x.n; }
+    { const ff = OF.fflow(now - 9e5); add('fut', 'fcvd15', 'Futures CVD (15 min)', ff.tot ? ff.d / ff.tot * 250 : 0, ff.tot ? OF.fmtUsd(ff.d, true) + ' net of ' + OF.fmtUsd(ff.tot) + ' on the perpetual' : 'No futures prints'); }
     add('fut', 'faggr', 'Futures aggression (1 min)', (fb + fs) ? (fb - fs) / (fb + fs) * 150 : 0, (fb + fs) ? (fb >= fs ? 'buyers ' : 'sellers ') + Math.round(Math.max(fb, fs) / (fb + fs) * 100) + '% of futures volume' : 'No futures prints');
     if (F.mark && S.last) add('fut', 'basis', 'Basis (futures vs spot)', 0, ((F.mark - S.last) / S.last * 1e4).toFixed(1) + ' bp');
     const lm = OF.liqMap();

@@ -365,7 +365,8 @@ OF.views.guide = {
         ['Single prints', 'One-letter rows inside the range mark a fast move; they often get revisited.'],
         ['Poor high / low', 'Two or more periods stopping at the same extreme — an unfinished auction that tends to be retested.']]) +
       sec('Honest limits', [
-        ['One exchange', 'Book and trades are Binance spot only. Other venues trade too, so treat walls and whales as a sample of the market.'],
+        ['Mostly one exchange', 'Trades, the heatmap and the DOM are Binance spot. Walls are also checked against the Bybit and OKX spot books, and futures flow comes from the Bybit perpetual. Other venues trade too, so treat walls and whales as a sample of the market.'],
+        ['The backtest covers candles only', 'The rules backtest in Trade plan → Scorecard replays only what candles can show. Order-book, futures, options and whale readings have no free history, so they are measured going forward by the signal journal instead.'],
         ['History starts when you open the page', 'Heatmap columns, L3 events and live whales are recorded in your browser only. Refreshing clears them. Candles and profiles load history from the exchange.'],
         ['Inference, not fact', 'Pulls, icebergs and spoofing are inferred from public data without order IDs. Liquidation clusters are a model. Use them as context.'],
         ['Not advice', 'Nothing here is a recommendation to trade.']]) + '</div>';

@@ -480,14 +480,14 @@ OF.drawLiqLines = (ctx, pw, Y, lo, hi) => {
 /* resting order-book liquidity: biggest bid / ask walls within ±3 % */
 OF.drawWallLines = (ctx, pw, Y, lo, hi) => {
   const S = OF.S; if (!S || !S.synced) return;
-  const mid = OF.mid(), bb = OF.bookBins(3, OF.niceStep(mid * 0.0008)), out = [];
-  for (const [p, n] of bb.b) out.push({ p: p + bb.bin / 2, n, bid: true }); for (const [p, n] of bb.a) out.push({ p: p + bb.bin / 2, n, bid: false });
+  const mid = OF.mid(), bb = OF.bookBinsAll(3, OF.niceStep(mid * 0.0008)), out = [];
+  for (const [p, n] of bb.b) out.push({ p: p + bb.bin / 2, n, bid: true, v: bb.nv('bid', p) }); for (const [p, n] of bb.a) out.push({ p: p + bb.bin / 2, n, bid: false, v: bb.nv('ask', p) });
   const pick = side => out.filter(w => w.bid === side && w.p > lo && w.p < hi).sort((a, b) => b.n - a.n).slice(0, 4);
   const all = pick(true).concat(pick(false)); let mx = 0; for (const w of all) mx = Math.max(mx, w.n);
   for (const w of all) {
     const y = Y(w.p), col = w.bid ? C.buy : C.sell, len = 30 + w.n / mx * 90;
     ctx.fillStyle = w.bid ? C.buyA + '.55)' : C.sellA + '.55)'; ctx.fillRect(pw - len, y - 2, len, 4);
-    ui.hline(ctx, 0, pw, y, col, [8, 3], (w.bid ? 'bid wall ' : 'ask wall ') + OF.fp(w.p) + ' · ' + OF.fmtUsd(w.n), pw * 0.42);
+    ui.hline(ctx, 0, pw, y, col, [8, 3], (w.bid ? 'bid wall ' : 'ask wall ') + OF.fp(w.p) + ' · ' + OF.fmtUsd(w.n) + (bb.venues > 1 ? ' · ' + w.v + '/' + bb.venues + ' venues' : ''), pw * 0.42);
   }
 };
 
@@ -625,7 +625,7 @@ OF.views.whales = {
   mount(v) { this.c = ui.canvas(v); ui.track(this); },
   thr() { const S = OF.S; return this.o.size === 'auto' ? (S.whaleThr || 50000) : +this.o.size; },
   data() {
-    const S = OF.S, from = S.trades.length ? S.trades[0].t : OF.now();
+    const S = OF.S, from = Math.min(S.trades.length ? S.trades[0].t : OF.now(), S.recW && S.recW.length ? S.recW[0][0] : Infinity);
     const list = OF.whaleList(this.o.mode, this.thr(), from);
     let b = 0, s = 0, bpq = 0, spq = 0; for (const w of list) { if (w.buy) { b += w.n; bpq += w.n * w.p; } else { s += w.n; spq += w.n * w.p; } }
     return { list, b, s, bAvg: b ? bpq / b : null, sAvg: s ? spq / s : null, from };

@@ -72,14 +72,15 @@ function newState(symbol) {
     events: [], placed: new Map(), tradedAt: new Map(), refill: new Map(), pullCount: new Map(), l3Min: 20000,
     k: {}, kLoading: {}, day: null,
     fut: { available: null, oiHist: [] }, futFlow: [], liqs: [], cb: null,
-    gamma: null, whaleThr: 0,
+    gamma: null, whaleThr: 0, fcvd: 0, xbook: {},
     volAt: new Map(), cqc: new Map()   // traded volume per exact price {b,s}; quote-change count per price
   };
 }
 
 let gen = 0, ws = null, bws = null, cbws = null, timers = [];
 function stopAll() {
-  [ws, bws, cbws].forEach(w => { if (w) { w.onclose = null; try { w.close(); } catch (e) {} } });
+  [ws, bws, cbws].concat(xws).forEach(w => { if (w) { w.onclose = null; try { w.close(); } catch (e) {} } });
+  xws = [];
   ws = bws = cbws = null; timers.forEach(clearInterval); timers = [];
   if (OF.demoTimer) { clearInterval(OF.demoTimer); OF.demoTimer = null; }
 }
@@ -108,6 +109,7 @@ OF.start = async function (symbol) {
   openSpot(g, 0);
   openBybit(g);
   openCoinbase(g);
+  openVenues(g);
   pollFutures(g);
   timers.push(setInterval(() => snapshotCol(S), 500));
   timers.push(setInterval(() => housekeeping(S), 5000));
@@ -395,7 +397,7 @@ function openBybit(g) {
       }
       if (S.liqs.length > 500) S.liqs.length = 500;
     } else if (m.topic.startsWith('publicTrade.')) {
-      for (const d of m.data) S.futFlow.push({ t: +d.T, n: +d.p * +d.v, buy: d.S === 'Buy', p: +d.p });
+      for (const d of m.data) { const n = +d.p * +d.v, buy = d.S === 'Buy'; S.futFlow.push({ t: +d.T, n, buy, p: +d.p }); S.fcvd += buy ? n : -n; }
       if (S.futFlow.length > 60000) S.futFlow.splice(0, 15000);
     }
   };
@@ -415,6 +417,55 @@ async function pollFutures(g) {
     OF.emit('fut');
   } catch (e) { /* liquidation map falls back to live-only */ }
 }
+
+/* ---------- other venues' spot order books (Bybit 200 levels, OKX 400 levels) ----------
+   Used only to confirm walls: a wall that also shows on another exchange is more believable.
+   Each book is a plain price → size map kept from the venue's snapshot + delta stream. */
+let xws = [];
+function openVenues(g) {
+  const S = OF.S, base = S.info.base, quote = S.info.quote;
+  const mk = () => ({ bids: new Map(), asks: new Map(), at: 0 });
+  const apply = (m, rows) => { for (const r of rows || []) { const p = +r[0], q = +r[1]; if (q === 0) m.delete(p); else m.set(p, q); } };
+  const run = (name, url, onOpen, parse, pingMsg) => {
+    if (g !== gen) return; let w, ping, dead = false;
+    try { w = new WebSocket(url); } catch (e) { return; }
+    xws.push(w);
+    w.onopen = () => { onOpen(w); ping = setInterval(() => { try { w.send(pingMsg); } catch (e) {} }, 20000); };
+    w.onmessage = ev => {
+      if (g !== gen || ev.data === 'pong') return; let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
+      if (m.success === false || m.event === 'error') { dead = true; try { w.close(); } catch (e) {} return; }   // pair not listed there
+      const u = parse(m); if (!u) return;
+      let bk = S.xbook[name]; if (u.snap || !bk) bk = S.xbook[name] = mk();
+      apply(bk.bids, u.b); apply(bk.asks, u.a); bk.at = Date.now();
+    };
+    w.onclose = () => { clearInterval(ping); delete S.xbook[name]; if (g === gen && !dead) setTimeout(() => run(name, url, onOpen, parse, pingMsg), 8000); };
+  };
+  run('bybit', 'wss://stream.bybit.com/v5/public/spot',
+    w => w.send(JSON.stringify({ op: 'subscribe', args: ['orderbook.200.' + base + quote] })),
+    m => m.topic && m.data ? { snap: m.type === 'snapshot', b: m.data.b, a: m.data.a } : null, '{"op":"ping"}');
+  run('okx', 'wss://ws.okx.com:8443/ws/v5/public',
+    w => w.send(JSON.stringify({ op: 'subscribe', args: [{ channel: 'books', instId: base + '-' + quote }] })),
+    m => m.arg && m.arg.channel === 'books' && m.data && m.data[0] ? { snap: m.action === 'snapshot', b: m.data[0].bids, a: m.data[0].asks } : null, 'ping');
+}
+
+OF._venues = () => openVenues(gen);   // used by tests
+
+/* Older 1h candles (about 5 more months) for the rules backtest. Kept apart from the live candle array. */
+OF.loadOld1h = async function () {
+  const S = OF.S; if (S.kxOld || S._kxLoading || OF.demo) return;
+  const k = S.k['1h']; if (!k || !k.length) return;
+  S._kxLoading = true;
+  try {
+    let end = k[0].t - 1, out = [];
+    for (let i = 0; i < 3; i++) {
+      const rows = await OF.getJ(`/api/v3/klines?symbol=${S.symbol}&interval=1h&endTime=${end}&limit=1000`);
+      if (!rows.length) break;
+      out = rows.map(r => ({ t: r[0], o: +r[1], h: +r[2], l: +r[3], c: +r[4], v: +r[5], qv: +r[7], bv: +r[9], bqv: +r[10] })).concat(out);
+      end = rows[0][0] - 1; if (rows.length < 1000) break;
+    }
+    if (OF.S === S) S.kxOld = out;
+  } catch (e) { S._kxLoading = false; }
+};
 
 /* ---------- Coinbase spot (US demand / premium) ---------- */
 function openCoinbase(g) {
