@@ -276,7 +276,7 @@ OF.views.liquidity = {
 /* ===================== FUTURES ===================== */
 OF.views.futures = {
   label: 'Futures', title: 'Perpetual futures — funding, open interest, basis, liquidations',
-  toolbar(tb) { tb.append(el('span', 'lbl', 'Bybit USDT perpetual (live) · liquidation map estimated from Binance futures open interest')); },
+  toolbar(tb) { const m = OF.METALS[OF.S.symbol]; tb.append(el('span', 'lbl', m && m.mkt === 'fut' ? `Binance ${m.name.toLowerCase()} perpetual (live): funding, open interest and liquidations · basis vs the ${m.name.toLowerCase()} index · trades 24/7, the index pauses when the metal market is closed` : 'Bybit USDT perpetual (live) · liquidation map estimated from Binance futures open interest')); },
   mount(v) { v.classList.add('scroll'); v.innerHTML = '<div class="cards" id="fuCards"></div><div class="fuwrap"><div class="gbox" id="fuMap"></div><div class="fuside"><div class="sh">Latest liquidations</div><div id="fuLiq"></div></div></div>'; this.c = ui.canvas(document.getElementById('fuMap')); ui.track(this); },
   render() {
     const S = OF.S; if (!S) return; const F = S.fut, now = OF.now();
@@ -285,11 +285,11 @@ OF.views.futures = {
       const h = F.oiHist, a1 = h.find(x => x.t >= now - 36e5) || h[0], a4 = h.find(x => x.t >= now - 144e5) || h[0], b = h[h.length - 1];
       const ch = a => a && b ? ((b.v - a.v) / a.v * 100).toFixed(2) + '%' : '--';
       let l5 = 0, s5 = 0, l1 = 0, s1 = 0, n1 = 0; for (const l of S.liqs) { if (l.t >= now - 36e5) { n1++; if (l.side === 'long') l1 += l.n; else s1 += l.n; } if (l.t >= now - 3e5) { if (l.side === 'long') l5 += l.n; else s5 += l.n; } }
-      const basis = F.mark && S.last ? (F.mark - S.last) / S.last * 1e4 : null, mins = F.nextFunding ? Math.round((F.nextFunding - Date.now()) / 6e4) : null;
+      const ref = S.mkt === 'fut' ? F.index : S.last, basis = F.mark && ref ? (F.mark - ref) / ref * 1e4 : null, mins = F.nextFunding ? Math.round((F.nextFunding - Date.now()) / 6e4) : null;
       document.getElementById('fuCards').innerHTML = `
         <div class="card"><div class="ct">Funding (per 8 h)</div><div class="cv">${F.funding != null ? (F.funding >= 0 ? '+' : '') + (F.funding * 100).toFixed(4) + '%' : '--'}</div><div class="cs">${F.funding != null ? (F.funding * 3 * 365 * 100).toFixed(1) + '% / yr' : ''}${mins != null ? ' · next in ' + mins + ' min' : ''}</div></div>
         <div class="card"><div class="ct">Open interest</div><div class="cv">${OF.fmtUsd(F.oiValue)}</div><div class="cs">1 h ${ch(a1)} · 4 h ${ch(a4)} <span class="muted">(since page open)</span></div></div>
-        <div class="card"><div class="ct">Basis (mark vs spot)</div><div class="cv">${basis != null ? basis.toFixed(1) + ' bp' : '--'}</div><div class="cs">${basis == null ? '' : Math.abs(basis) < 8 ? 'in line with spot' : basis > 0 ? 'futures at a premium — leveraged longs keen' : 'futures at a discount — leveraged shorts keen'}</div></div>
+        <div class="card"><div class="ct">Basis (mark vs ${S.mkt === 'fut' ? 'index' : 'spot'})</div><div class="cv">${basis != null ? basis.toFixed(1) + ' bp' : '--'}</div><div class="cs">${basis == null ? '' : Math.abs(basis) < 8 ? 'in line with spot' : basis > 0 ? 'futures at a premium — leveraged longs keen' : 'futures at a discount — leveraged shorts keen'}</div></div>
         <div class="card"><div class="ct">Liquidations (live)</div><div class="cv sm2">5 m: <span class="r">${OF.fmtUsd(l5)} L</span> · <span class="g">${OF.fmtUsd(s5)} S</span></div><div class="cs">1 h: ${OF.fmtUsd(l1)} longs · ${OF.fmtUsd(s1)} shorts (${n1})</div></div>`;
     }
     document.getElementById('fuLiq').innerHTML = S.liqs.length ? S.liqs.slice(0, 40).map(l => `<div class="lq"><span class="mono">${OF.hm(l.t, true)}</span> <span class="${l.side === 'long' ? 'r' : 'g'}">${l.side}</span> <span class="mono">${OF.fp(l.p)}</span> <b class="mono">${OF.fmtUsd(l.n)}</b></div>`).join('') : '<div class="muted pad">None yet — they come in bursts when price runs into crowded positions.</div>';
@@ -347,6 +347,8 @@ OF.views.guide = {
       sec('Views', [
         ['Heatmap', 'Every half-second the whole order book is photographed and drawn as one column; brighter = more money resting at that price. Horizontal bright bands are walls. Bubbles are trades (green = buyer hit the ask, red = seller hit the bid). ✕ marks a large order that vanished without trading.'],
         ['Chart', 'Normal candles with EMA 21/50, RSI and session VWAP. Scroll to zoom, drag to pan, double-click to reset. Draw lines and levels; they are saved per coin in your browser.'],
+        ['Gold and silver', 'Symbol menu → Metals. Gold (XAUUSDT) and silver (XAGUSDT) are Binance perpetual futures that trade 24/7, so the order book, trades, funding, open interest and liquidations all come from that one market. The metal market itself closes at weekends; the index price then stays at its last value. PAXG is a gold-backed spot token.'],
+        ['HTF S/R + Weekly Bias', 'On the Chart tab (HTF S/R, ⚙ for settings). The latest pivot high and low on 4h, 12h, daily and weekly candles, counted only after the candle len bars later has closed. A new weekly pivot low puts it in SUPPORT mode and Levels 1–3 then show only support; a new weekly pivot high puts it in RESISTANCE mode. W SUP / W RES mark the bar where the weekly pivot was confirmed. Port of the TradingView script by BigBeluga, CC BY-NC-SA 4.0.'],
         ['Footprint', 'Inside each candle: sold × bought volume at every price row. Bold numbers are 3:1 diagonal imbalances. The yellow box is the candle’s POC; dotted yellow lines are naked POCs not yet revisited.'],
         ['Whales', 'Only the big participants. Pick how a whale is detected and the size floor; bubbles are summed per candle. Buyers’/sellers’ average shows where whales are in profit or loss.'],
         ['Vol profile', 'Volume traded at each price. POC = most traded price; value area = the 70% of volume around it. Price outside value is either being accepted (stays) or rejected (snaps back).'],

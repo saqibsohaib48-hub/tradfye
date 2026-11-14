@@ -342,7 +342,8 @@ OF.views.chart = {
       ui.toggle('RSI 14', o.rsi, v => { o.rsi = v; save(); }), ui.toggle('VWAP', o.vwap, v => { o.vwap = v; save(); }),
       el('span', 'lbl', 'Overlays'),
       ui.toggle('Whales', o.whales, v => { o.whales = v; save(); }), ui.toggle('Gamma', o.gamma, v => { o.gamma = v; save(); if (v) OF.loadGamma(); }),
-      el('span', 'lbl', 'Draw'));
+      ui.toggle('HTF S/R', OF.htfsr.cfg().on, v => OF.htfsr.toggle(v), 'HTF Support/Resistance + Weekly Bias Filter (BigBeluga)'));
+    const gear = el('button', 'tgl htfgear', '⚙'); gear.title = 'HTF S/R settings'; gear.onclick = () => OF.htfsr.panel(gear); tb.append(gear, el('span', 'lbl', 'Draw'));
     const tools = el('div', 'seg');
     [['trend', '╱ Line'], ['hline', '— Level'], ['clear', '🗑']].forEach(([k, t]) => {
       const b = el('button', '', t);
@@ -397,7 +398,7 @@ OF.views.chart = {
     let vmx = 0; for (let i = i0; i < end; i++) vmx = Math.max(vmx, k[i].qv);
     for (let i = i0; i < end; i++) { const h = k[i].qv / vmx * volH; ctx.fillStyle = k[i].c >= k[i].o ? 'rgba(34,197,94,.35)' : 'rgba(239,68,68,.35)'; ctx.fillRect(X(i) - bw * 0.35, mainH - h, Math.max(1, bw * 0.7), h); }
     OF.drawCandles(ctx, k, i0, end, X, Y, bw * 0.7);
-    const line = (vals, col) => { ctx.strokeStyle = col; ctx.lineWidth = 1.3; ctx.beginPath(); let s = false; for (let i = i0; i < end; i++) { if (vals[i] == null) continue; const y = Y(vals[i]); s ? ctx.lineTo(X(i), y) : ctx.moveTo(X(i), y); s = true; } ctx.stroke(); ctx.lineWidth = 1; };
+    const line = (vals, col) => { ctx.shadowColor = col; ctx.shadowBlur = 8; ctx.strokeStyle = col; ctx.lineWidth = 1.6; ctx.beginPath(); let s = false; for (let i = i0; i < end; i++) { if (vals[i] == null) continue; const y = Y(vals[i]); s ? ctx.lineTo(X(i), y) : ctx.moveTo(X(i), y); s = true; } ctx.stroke(); ctx.lineWidth = 1; ctx.shadowBlur = 0; };
     const legend = [];
     if (o.ema21) { line(OF.ema(k, 21), C.blue); legend.push([C.blue, 'EMA 21']); }
     if (o.ema50) { line(OF.ema(k, 50), C.amber); legend.push([C.amber, 'EMA 50']); }
@@ -413,6 +414,7 @@ OF.views.chart = {
     if (OF.app.lines.liq) OF.drawLiqLines(ctx, pw, Y, lo, hi);
     if (OF.app.lines.walls) OF.drawWallLines(ctx, pw, Y, lo, hi);
     OF.drawKeyLevels(ctx, 0, pw, Y, lo, hi);
+    OF.htfsr.draw(ctx, { k, i0, end, X, Y, lo, hi, pw, bw, ms, top: 10, bottom: mainH - volH });
     // drawings
     const draws = LS.get('draw:' + S.symbol, []).concat(this.draft ? [this.draft] : []);
     ctx.strokeStyle = '#e5e7eb'; ctx.lineWidth = 1.2;

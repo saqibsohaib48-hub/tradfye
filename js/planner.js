@@ -396,7 +396,7 @@ OF.views.plan = {
   applyFull() { if (this.root) this.root.classList.toggle('plfull', !!this.o.full); this.c && this.c.fit(); },
   mount(v) {
     this.root = v; v.classList.add('scroll');
-    v.innerHTML = '<div id="plMain"></div><div class="plgrid"><div class="gbox plchart" id="plChart"></div><div id="plSide"></div></div><div id="plFactors"></div>';
+    v.innerHTML = '<div id="plMain"></div><div id="plFocus"></div><div class="plgrid"><div class="gbox plchart" id="plChart"></div><div id="plSide"></div></div><div id="plFactors"></div>';
     this.c = ui.canvas(document.getElementById('plChart')); ui.track(this);
     const cv = this.c.cv; let drag = null;
     this.yz = 1; this.yoff = 0;
@@ -423,6 +423,60 @@ OF.views.plan = {
     for (const L of this.openT()) { const before = L.state; advance(L); if (L.state !== before) changed = true; }
     if (changed || !this._sv || Date.now() - this._sv > 10000) { this.saveT(); this._sv = Date.now(); }
     if (changed) { this.renderSub(); this.lastHtml = 0; }
+  },
+  /* ---------- 📍 view one trade on the chart ---------- */
+  focus(id) {
+    const L = this.T.find(t => String(t.id) === String(id)); if (!L) return;
+    this.focusId = String(id);
+    const tf = this.isScalp() ? this.o.ctfS : this.o.ctf, ms = OF.tfMs[tf], last = L.closedAt || OF.now(), bars = Math.ceil((OF.now() - L.created) / ms), back = Math.max(0, Math.floor((OF.now() - last) / ms) - 8);
+    this.zv = { n: OF.clamp(Math.max(60, bars - back + 20), 15, 600), off: back }; this.yz = 1; this.yoff = 0;
+    this.html();
+    setTimeout(() => { const c = document.getElementById('plChart'); if (c) c.scrollIntoView({ behavior: 'smooth', block: 'center' }); }, 60);
+  },
+  unfocus() { this.focusId = null; this.zv = { n: 72, off: 0 }; this.yz = 1; this.yoff = 0; this.html(); },
+  focusBar() {
+    const box = document.getElementById('plFocus'); if (!box) return;
+    const L = this.focusId ? this.T.find(t => String(t.id) === this.focusId) : null;
+    if (!L) { box.innerHTML = ''; return; }
+    const st = statusOf(L, OF.S.last), fp = OF.fp, idx = this.T.indexOf(L) + 1;
+    box.innerHTML = `<div class="fbar ${st.cls}"><span class="fpin">📍</span><div class="fmain"><div class="ftop"><span class="pill ${L.dir > 0 ? 'b' : 's'}">${L.dir > 0 ? 'LONG' : 'SHORT'}</span> <b>Viewing trade #${idx} on the chart</b> <span class="muted sm">${MODES[L.mode] ? MODES[L.mode].name : L.mode} · tracked ${dstr(L.created)}</span></div>
+      <div class="fst">${st.icon} ${st.head}</div>
+      <div class="flv mono"><span>Entry <b>${fp(L.entry)}</b></span><span class="r">Stop <b>${fp(L.stopNow)}</b></span><span class="g">TP1 <b>${fp(L.tp1)}</b></span><span class="g">TP2 <b>${fp(L.tp2)}</b></span></div></div>
+      <button class="fclose" title="Back to all trades (Esc)">✕ Back to all trades</button></div>`;
+    box.querySelector('.fclose').onclick = () => this.unfocus();
+  },
+  drawFocus(ctx, L, tx, Y, pw, ph) {
+    const fin = FINAL[L.state], x0 = OF.clamp(tx(L.created), 0, pw - 30), x1 = L.closedAt ? OF.clamp(tx(L.closedAt), x0 + 8, pw) : pw;
+    const ye = Y(L.entry), ys = Y(L.stop), ysn = Y(L.stopNow), y1 = Y(L.tp1), y2 = Y(L.tp2), d = L.dir;
+    ctx.save();
+    // risk and reward boxes over the life of the trade
+    ctx.fillStyle = 'rgba(239,68,68,.20)'; ctx.fillRect(x0, Math.min(ye, ys), x1 - x0, Math.abs(ys - ye));
+    ctx.fillStyle = 'rgba(34,197,94,.16)'; ctx.fillRect(x0, Math.min(ye, y2), x1 - x0, Math.abs(y2 - ye));
+    ctx.fillStyle = 'rgba(34,197,94,.10)'; ctx.fillRect(x0, Math.min(ye, y1), x1 - x0, Math.abs(y1 - ye));
+    // start / end markers
+    ctx.strokeStyle = 'rgba(255,255,255,.35)'; ctx.setLineDash([3, 3]); ctx.beginPath(); ctx.moveTo(x0 + .5, 0); ctx.lineTo(x0 + .5, ph); if (L.closedAt) { ctx.moveTo(x1 + .5, 0); ctx.lineTo(x1 + .5, ph); } ctx.stroke(); ctx.setLineDash([]);
+    const line = (y, col, w, dash, txt, val, rr) => {
+      ctx.strokeStyle = col; ctx.lineWidth = w; ctx.setLineDash(dash); ctx.beginPath(); ctx.moveTo(x0, Math.round(y) + .5); ctx.lineTo(pw, Math.round(y) + .5); ctx.stroke(); ctx.setLineDash([]); ctx.lineWidth = 1;
+      ctx.font = 'bold 12px ui-monospace,Menlo,monospace'; const t = `${txt} ${OF.fp(val)}${rr || ''}`, tw = ctx.measureText(t).width + 14, lx = OF.clamp(x0 + 6, 0, pw - tw - 4);
+      ctx.fillStyle = col; ctx.fillRect(lx, y - 10, tw, 20); ctx.fillStyle = '#05070a'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle'; ctx.fillText(t, lx + 7, y + .5);
+      ui.tag(ctx, pw + 1, y, OF.fp(val), col, '#05070a');
+    };
+    if (L.stopNow !== L.stop) line(ys, 'rgba(239,68,68,.55)', 1, [5, 4], 'first stop', L.stop, '');
+    line(y2, '#4ade80', 2, [6, 3], 'TP2', L.tp2, ` · +${L.rr2.toFixed(1)}R`);
+    line(y1, '#22c55e', 2, [], L.state === 'tp1' || L.state === 'done' || L.state === 'breakeven' ? 'TP1 ✓' : 'TP1', L.tp1, ` · +${L.rr1.toFixed(1)}R`);
+    line(ysn, '#ef4444', 2, [], L.stopNow !== L.stop ? 'STOP (moved)' : 'STOP', L.stopNow, ' · −1R');
+    line(ye, '#f8fafc', 2.5, [], L.state === 'waiting' ? 'ENTRY (waiting)' : 'ENTRY', L.entry, '');
+    // fill and exit markers
+    const dot = (x, y, col, ring) => { ctx.beginPath(); ctx.arc(x, y, 6, 0, 7); ctx.fillStyle = col; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = ring; ctx.stroke(); ctx.lineWidth = 1; };
+    if (L.filledAt) dot(OF.clamp(tx(L.filledAt), 0, pw), ye, '#f8fafc', '#05070a');
+    if (fin && L.closedAt) {
+      const ex = L.exitPx != null ? L.exitPx : L.state === 'stopped' ? L.stopNow : L.state === 'done' ? (L.exit === 'tp1' ? L.tp1 : L.tp2) : L.state === 'breakeven' ? L.entry : null;
+      if (ex != null) dot(x1, Y(ex), resultR(L, OF.S.last) >= 0 ? '#22c55e' : '#ef4444', '#05070a');
+    }
+    // direction arrow at the entry
+    ctx.fillStyle = d > 0 ? '#22c55e' : '#ef4444'; ctx.beginPath(); const ax = x0 + 3, ay = ye + (d > 0 ? 18 : -18);
+    ctx.moveTo(ax, ay); ctx.lineTo(ax + 7, ay + (d > 0 ? 10 : -10)); ctx.lineTo(ax - 7, ay + (d > 0 ? 10 : -10)); ctx.closePath(); ctx.fill();
+    ctx.restore();
   },
   /* ---------- 🤖 AUTO: watch the candle close, confirm, create and track trades by itself ---------- */
   autoKey(mode) { return 'auto:' + OF.S.symbol + ':' + mode; },
@@ -523,15 +577,15 @@ OF.views.plan = {
   },
   html() {
     const S = OF.S, main = document.getElementById('plMain'), side = document.getElementById('plSide'), fac = document.getElementById('plFactors'); if (!main) return;
-    this.lastHtml = Date.now(); this.renderSub();
+    this.lastHtml = Date.now(); this.renderSub(); this.focusBar();
     const o = this.o, sub = o.sub, px = S.last, fp = OF.fp, p = this.analysis(o.mode), open = this.openT();
     side.style.display = sub === 'next' ? '' : 'none'; fac.style.display = sub === 'next' ? '' : 'none';
     const pill = s => `<span class="pill ${s > 0 ? 'b' : 's'}">${s > 0 ? 'LONG' : 'SHORT'}</span>`;
     if (sub === 'open') {
       const card = L => {
         const st = statusOf(L, px), h = this.health(L);
-        return `<div class="trd ${st.cls}" data-id="${L.id}">
-          <div class="trh">${pill(L.dir)} <b>${L.symbol}</b> <span class="muted sm">${MODES[L.mode] ? MODES[L.mode].name : L.mode} · tracked ${dstr(L.created)}</span><span class="trb"><button data-a="mode" title="Move this trade to the other mode (which chart it shows on)">↔ make ${L.mode === 'swing' ? 'Intraday' : 'Swing'}</button><button data-a="close">✋ I closed it (at ${fp(px)})</button><button data-a="del" title="Remove from the list">🗑</button></span></div>
+        return `<div class="trd ${st.cls}${String(L.id) === this.focusId ? ' focused' : ''}" data-id="${L.id}">
+          <div class="trh">${pill(L.dir)} <b>${L.symbol}</b> <span class="muted sm">${MODES[L.mode] ? MODES[L.mode].name : L.mode} · tracked ${dstr(L.created)}</span><span class="trb"><button data-a="view" class="viewon${String(L.id) === this.focusId ? ' on' : ''}" title="Show this trade's entry, stop and targets on the chart">📍 ${String(L.id) === this.focusId ? 'On chart' : 'View on chart'}</button><button data-a="mode" title="Move this trade to the other mode (which chart it shows on)">↔ make ${L.mode === 'swing' ? 'Intraday' : 'Swing'}</button><button data-a="close">✋ I closed it (at ${fp(px)})</button><button data-a="del" title="Remove from the list">🗑</button></span></div>
           <div class="plstatus ${st.cls}"><span class="pli">${st.icon}</span><div><div class="plsh">${st.head}</div><div class="plsb">${st.body}</div></div></div>
           <div class="trn mono"><span>Entry <b>${fp(L.entry)}</b></span><span class="r">Stop <b>${fp(L.stopNow)}</b>${L.stopNow !== L.stop ? ' (moved)' : ''}</span><span class="g">TP1 <b>${fp(L.tp1)}</b></span><span class="g">TP2 <b>${fp(L.tp2)}</b></span><span>Size <b>${L.qty ? (L.qty < 1 ? L.qty.toFixed(4) : L.qty.toFixed(3)) + ' ' + S.info.base : '—'}</b></span><span class="muted">Exit: ${L.exit === 'tp1' ? 'all at TP1' : L.exit === 'tp2' ? 'all at TP2' : 'half at TP1'}${L.setup && L.setup !== 'zone' ? ' · ' + L.setup + ' setup' : ''}${L.costR ? ' · fees ' + L.costR.toFixed(2) + 'R' : ''}</span></div>
           <div class="hl ${h.cls}"><div class="hlv">Health check: <b>${h.v}</b> — ${h.act || ''}</div>${h.items.map(([c, t]) => `<div class="hli ${c}">${c === 'ok' ? '✓' : c === 'bad' ? '✗' : '!'} ${t}</div>`).join('')}<div class="muted sm">Re-checked every 15 s against the latest ${MODES[L.mode] ? MODES[L.mode].name : ''} analysis and key points. Rules, not advice — you decide.</div></div>
@@ -546,7 +600,8 @@ OF.views.plan = {
         const L = this.T.find(t => String(t.id) === div.dataset.id);
         div.querySelector('[data-a=close]').onclick = () => { if (L.state === 'tp1') L.halfOff = true; L.state = 'closed'; L.exitPx = S.last; L.closedAt = OF.now(); L.events.push([OF.now(), 'Closed by you at ' + OF.fp(S.last)]); this.saveT(); this.html(); };
         div.querySelector('[data-a=mode]').onclick = () => { L.mode = L.mode === 'swing' ? 'intraday' : 'swing'; L.expires = L.created + MODES[L.mode].exp; L.expLabel = MODES[L.mode].expLabel; this.saveT(); this.html(); };
-        div.querySelector('[data-a=del]').onclick = () => { this.T = this.T.filter(t => t !== L); this.saveT(); this.html(); };
+        div.querySelector('[data-a=view]').onclick = () => this.focus(L.id);
+        div.querySelector('[data-a=del]').onclick = () => { if (String(L.id) === this.focusId) this.focusId = null; this.T = this.T.filter(t => t !== L); this.saveT(); this.html(); };
       });
       const f = main.querySelector('.addf');
       if (fresh) f.querySelector('button').onclick = () => {
@@ -564,7 +619,8 @@ OF.views.plan = {
       const traded = done.filter(t => !['missed', 'expired'].includes(t.state)), rs = traded.map(t => resultR(t, px));
       const wins = rs.filter(r => r > 0).length, tot = rs.reduce((a, r) => a + r, 0), usd = traded.reduce((a, t) => a + resultR(t, px) * (t.riskUsd || 0), 0);
       main.innerHTML = `<div class="cards"><div class="card sm"><div class="ct">Finished trades</div><div class="cv">${traded.length}</div></div><div class="card sm"><div class="ct">Win rate</div><div class="cv">${traded.length ? Math.round(wins / traded.length * 100) + '%' : '—'}</div></div><div class="card sm"><div class="ct">Total</div><div class="cv ${tot >= 0 ? 'g' : 'r'}">${tot >= 0 ? '+' : ''}${tot.toFixed(2)}R</div></div><div class="card sm"><div class="ct">Total $</div><div class="cv ${usd >= 0 ? 'g' : 'r'}">${OF.fmtUsd(usd, true)}</div></div><div class="card sm"><div class="ct">Never filled</div><div class="cv">${done.length - traded.length}</div></div></div>
-        <table class="tbl"><thead><tr><th>Tracked</th><th>Mode</th><th>Side</th><th class="rt">Entry</th><th class="rt">Stop</th><th class="rt">TP1 / TP2</th><th>Result</th><th class="rt">R</th><th class="rt">$</th><th></th></tr></thead><tbody>${done.map(t => { const r = resultR(t, px); return `<tr><td class="mono">${dstr(t.created)}</td><td>${MODES[t.mode] ? MODES[t.mode].name : t.mode}</td><td>${pill(t.dir)}</td><td class="rt mono">${fp(t.entry)}</td><td class="rt mono">${fp(t.stop)}</td><td class="rt mono">${fp(t.tp1)} / ${fp(t.tp2)}</td><td>${statusOf(t, px).icon} ${t.state}</td><td class="rt mono ${r >= 0 ? 'g' : 'r'}">${r >= 0 ? '+' : ''}${r.toFixed(2)}</td><td class="rt mono">${t.riskUsd ? OF.fmtUsd(r * t.riskUsd, true) : '—'}</td><td><button class="hdel" data-id="${t.id}" title="Remove">🗑</button></td></tr>`; }).join('') || '<tr><td colspan="10" class="empty">No finished trades yet.</td></tr>'}</tbody></table>`;
+        <table class="tbl"><thead><tr><th>Tracked</th><th>Mode</th><th>Side</th><th class="rt">Entry</th><th class="rt">Stop</th><th class="rt">TP1 / TP2</th><th>Result</th><th class="rt">R</th><th class="rt">$</th><th></th></tr></thead><tbody>${done.map(t => { const r = resultR(t, px); return `<tr><td class="mono">${dstr(t.created)}</td><td>${MODES[t.mode] ? MODES[t.mode].name : t.mode}</td><td>${pill(t.dir)}</td><td class="rt mono">${fp(t.entry)}</td><td class="rt mono">${fp(t.stop)}</td><td class="rt mono">${fp(t.tp1)} / ${fp(t.tp2)}</td><td>${statusOf(t, px).icon} ${t.state}</td><td class="rt mono ${r >= 0 ? 'g' : 'r'}">${r >= 0 ? '+' : ''}${r.toFixed(2)}</td><td class="rt mono">${t.riskUsd ? OF.fmtUsd(r * t.riskUsd, true) : '—'}</td><td class="nowrap"><button class="hview" data-id="${t.id}" title="Show this trade on the chart">📍 View</button> <button class="hdel" data-id="${t.id}" title="Remove">🗑</button></td></tr>`; }).join('') || '<tr><td colspan="10" class="empty">No finished trades yet.</td></tr>'}</tbody></table>`;
+      main.querySelectorAll('.hview').forEach(b => b.onclick = () => this.focus(b.dataset.id));
       main.querySelectorAll('.hdel').forEach(b => b.onclick = () => { this.T = this.T.filter(t => String(t.id) !== b.dataset.id); this.saveT(); this.html(); });
     } else { this._lastSub = 'next'; this.htmlNext(main, side, fac, p, open); }
   },
@@ -629,16 +685,19 @@ OF.views.plan = {
     ctx.fillStyle = C.bg; ctx.fillRect(0, 0, W, H);
     if (!p || p.wait) { ui.msg(ctx, W, H, p ? p.wait : 'Loading…'); return; }
     const tf = this.isScalp() ? this.o.ctfS : this.o.ctf, k = S.k[tf]; if (!k || !k.length) { OF.loadKlines(tf); ui.msg(ctx, W, H, 'Loading ' + tf + ' candles…'); return; }
-    const ms = OF.tfMs[tf], AX = 80, TB = 18, pw = W - AX, ph = H - TB, allOpen = this.openT(), open = allOpen.filter(L => (L.mode || 'intraday') === this.o.mode), others = allOpen.length - open.length;
+    const ms = OF.tfMs[tf], AX = 80, TB = 18, pw = W - AX, ph = H - TB, allOpen = this.openT(); let open = allOpen.filter(L => (L.mode || 'intraday') === this.o.mode); const others = allOpen.length - open.length;
     this.pw = pw;
+    const F = this.focusId ? this.T.find(t => String(t.id) === this.focusId) : null; if (this.focusId && !F) this.focusId = null;
+    if (F) open = [];
     const n = Math.min(this.zv.n, k.length), end = Math.max(n, k.length - this.zv.off), i0 = Math.max(0, end - n);
     const bw = pw / (n + Math.max(6, n * 0.18)), X = i => (i - i0 + 0.5) * bw; this.bw = bw;
-    const nxt = this.o.sub !== 'open' && !open.length ? p.plan : null, lv = [], ideas = !p.plan && !open.length ? rankIdeas(p) : [];
+    const nxt = !F && this.o.sub !== 'open' && !open.length ? p.plan : null, lv = [], ideas = !F && !p.plan && !open.length ? rankIdeas(p) : [];
     ideas.forEach(r => lv.push(r.q.entry, r.q.stop, r.q.tp1));
     open.forEach(L => lv.push(L.entry, L.stopNow, L.tp1, L.tp2)); if (nxt) lv.push(nxt.entry, nxt.stop, nxt.tp1, nxt.tp2);
     let lo = Infinity, hi = -Infinity; for (let i = i0; i < end; i++) { lo = Math.min(lo, k[i].l); hi = Math.max(hi, k[i].h); }
     // include trade levels only if they are reasonably close; far ones become edge arrows (they used to flatten the candles)
     const span0 = hi - lo; lv.forEach(v => { if (v > lo - span0 * 0.8 && v < hi + span0 * 0.8) { lo = Math.min(lo, v); hi = Math.max(hi, v); } });
+    if (F) [F.entry, F.stop, F.stopNow, F.tp1, F.tp2].forEach(v => { lo = Math.min(lo, v); hi = Math.max(hi, v); });   // a viewed trade always fits on screen
     const pad = (hi - lo) * 0.05; lo -= pad; hi += pad;
     { const mid = (lo + hi) / 2 + this.yoff, half = (hi - lo) / 2 * this.yz; lo = mid - half; hi = mid + half; }
     const Y = v => 6 + (ph - 12) - (v - lo) / (hi - lo) * (ph - 12); this.ppx = (hi - lo) / (ph - 12);
@@ -665,6 +724,7 @@ OF.views.plan = {
       ui.hline(ctx, x0, pw, Y(L.tp2), C.buy, [], lab + 'TP2 ' + OF.fp(L.tp2), lx);
       if (L.filledAt) { ctx.beginPath(); ctx.arc(tx(L.filledAt), ye, 5, 0, 7); ctx.fillStyle = '#fff'; ctx.fill(); }
     });
+    if (F) this.drawFocus(ctx, F, tx, Y, pw, ph);
     // next plan: dashed
     if (nxt) {
       const x0 = X(end - 1) + bw, lx = Math.min(x0, pw - 260);
@@ -695,12 +755,13 @@ OF.views.plan = {
       ctx.restore();
     });
     OF.drawKeyLevels(ctx, 0, pw, Y, lo, hi);
+    OF.htfsr.draw(ctx, { k, i0, end, X, Y, lo, hi, pw, bw, ms, top: 6, bottom: ph - 6 });
     if (S.last) { ui.hline(ctx, 0, pw, Y(S.last), 'rgba(229,231,235,.5)', [1, 3]); ui.tag(ctx, pw + 1, Y(S.last), OF.fp(S.last), '#e5e7eb', '#000'); }
     ctx.font = '11px ui-monospace,monospace'; ctx.fillStyle = C.muted; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
     this.drawStage(ctx, pw, open, p);
     ctx.font = '11px ui-monospace,monospace'; ctx.fillStyle = C.muted; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
     ctx.fillText(S.symbol + ' · ' + tf + ' · ' + MODES[this.o.mode].name + ' trades solid, next plan dashed · scroll = time zoom · scroll on price scale (or Shift) = price zoom · drag = pan · double-click = reset', 8, 8);
-    if (others) { ctx.fillStyle = C.amber; ctx.fillText(`${others} ${this.o.mode === 'swing' ? 'intraday' : 'swing'} trade${others > 1 ? 's' : ''} not shown here — switch Mode to ${this.o.mode === 'swing' ? 'Intraday 1h' : '📅 Swing 1D'} to see ${others > 1 ? 'them' : 'it'}`, 8, 22); }
+    if (others && !F) { ctx.fillStyle = C.amber; ctx.fillText(`${others} ${this.o.mode === 'swing' ? 'intraday' : 'swing'} trade${others > 1 ? 's' : ''} not shown here — switch Mode to ${this.o.mode === 'swing' ? 'Intraday 1h' : '📅 Swing 1D'} to see ${others > 1 ? 'them' : 'it'}`, 8, 22); }
     ui.cross(ctx, this.mouse, 0, pw, 6, ph - 12, lo, hi, pw + 1, x => k[i0].t + (x / bw) * ms);
   }
 };
@@ -885,3 +946,5 @@ OF.drawTradeLines = function (ctx, pw, Y, lo, hi) {
     }
   }
 };
+
+document.addEventListener('keydown', e => { const v = OF.views.plan; if (e.key === 'Escape' && v && v.focusId) v.unfocus(); });

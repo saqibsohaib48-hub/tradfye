@@ -9,6 +9,18 @@ const SPOT_REST = ['https://data-api.binance.vision', 'https://api.binance.com']
 const SPOT_WS = ['wss://data-stream.binance.vision', 'wss://stream.binance.com:9443'];
 const BYBIT_WS = 'wss://stream.bybit.com/v5/public/linear';
 const FAPI = 'https://fapi.binance.com';
+/* Binance USDⓈ-M futures websockets. Since 2026-04-23 market data is split: order book + best bid/ask on /public,
+   trades, liquidations and klines on /market (the old /stream and /ws paths no longer carry them). */
+const FWS_PUBLIC = 'wss://fstream.binance.com/public', FWS_MARKET = 'wss://fstream.binance.com/market';
+OF.SPOT_REST = SPOT_REST; OF.FAPI = FAPI;
+
+/* Gold and silver: Binance TradFi perpetuals (USDⓈ-M, 24/7, settled in USDT). PAXG is a gold-backed spot token. */
+OF.METALS = {
+  XAUUSDT: { name: 'Gold', sym: 'Au', mkt: 'fut', note: 'Binance gold perpetual (XAU) · 24/7' },
+  XAGUSDT: { name: 'Silver', sym: 'Ag', mkt: 'fut', note: 'Binance silver perpetual (XAG) · 24/7' },
+  PAXGUSDT: { name: 'Gold token', sym: 'Au', mkt: 'spot', note: 'PAX Gold on Binance spot (1 token = 1 oz gold)' }
+};
+OF.isFut = sym => !!(OF.METALS[sym] && OF.METALS[sym].mkt === 'fut');
 
 /* ---------- small helpers ---------- */
 OF.LS = {
@@ -51,7 +63,9 @@ OF.mid = () => { const S = OF.S; if (!S) return 0; return (S.bb && S.ba) ? (S.bb
 /* binary search: first index with arr[i].t >= t */
 OF.lb = (arr, t) => { let lo = 0, hi = arr.length; while (lo < hi) { const m = (lo + hi) >> 1; if (arr[m].t < t) lo = m + 1; else hi = m; } return lo; };
 
+const toFut = path => path.replace('/api/v3/', '/fapi/v1/').replace(/([?&]limit=)5000\b/, (m, a) => a + '1000').replace(/[?&]type=MINI/, '');   // futures depth max 1000
 OF.getJ = async function (path, bases) {
+  if (!bases && OF.S && OF.S.mkt === 'fut' && path.startsWith('/api/v3/')) { path = toFut(path); bases = [FAPI]; }
   bases = bases || SPOT_REST; let err;
   for (const b of bases) {
     try { const r = await fetch(b + path); if (!r.ok) throw new Error('HTTP ' + r.status); return await r.json(); }
@@ -88,6 +102,7 @@ function stopAll() {
 OF.start = async function (symbol) {
   gen++; const g = gen; stopAll();
   const S = OF.S = newState(symbol);
+  S.mkt = OF.isFut(symbol) ? 'fut' : 'spot';
   OF.emit('reset');
   if (OF.demo) {
     OF.startDemo(S);
@@ -96,9 +111,11 @@ OF.start = async function (symbol) {
     return;
   }
   try {
-    const [ex, tm] = await Promise.all([OF.getJ('/api/v3/exchangeInfo?symbol=' + symbol), OF.getJ('/api/v3/time')]);
+    const fut = S.mkt === 'fut';
+    const [ex, tm] = await Promise.all([fut ? OF.getJ('/fapi/v1/exchangeInfo', [FAPI]) : OF.getJ('/api/v3/exchangeInfo?symbol=' + symbol), OF.getJ('/api/v3/time')]);
     S.offset = tm.serverTime - Date.now();
-    const si = ex.symbols[0], pf = si.filters.find(f => f.filterType === 'PRICE_FILTER');
+    const si = ex.symbols.find(x => x.symbol === symbol); if (!si) throw new Error(symbol + ' is not listed');
+    const pf = si.filters.find(f => f.filterType === 'PRICE_FILTER');
     const tick = parseFloat(pf.tickSize);
     S.info = { base: si.baseAsset, quote: si.quoteAsset, tick, dp: Math.max(0, Math.round(-Math.log10(tick))) };
   } catch (e) {
@@ -106,10 +123,17 @@ OF.start = async function (symbol) {
   }
   if (g !== gen) return;
   OF.emit('info');
-  openSpot(g, 0);
-  openBybit(g);
-  openCoinbase(g);
-  openVenues(g);
+  if (S.mkt === 'fut') {
+    // a perpetual is its own futures market: funding, open interest and liquidations come from Binance
+    S.fut.available = true;
+    openFut(g); pollPremium(g);
+    timers.push(setInterval(() => pollPremium(g), 15000));
+  } else {
+    openSpot(g, 0);
+    openBybit(g);
+    openCoinbase(g);
+    openVenues(g);
+  }
   pollFutures(g);
   timers.push(setInterval(() => snapshotCol(S), 500));
   timers.push(setInterval(() => housekeeping(S), 5000));
@@ -141,6 +165,56 @@ function openSpot(g, alt) {
   };
 }
 
+/* ---------- Binance USDⓈ-M futures websockets (gold / silver) ---------- */
+function openFut(g) {
+  const S = OF.S, s = S.symbol.toLowerCase();
+  S.status = 'SYNCING'; OF.emit('status');
+  const pub = ws = new WebSocket(FWS_PUBLIC + '/stream?streams=' + [s + '@depth@100ms', s + '@bookTicker'].join('/'));
+  pub.onopen = () => resync(g);
+  pub.onmessage = ev => {
+    if (g !== gen) return;
+    const m = JSON.parse(ev.data), d = m.data, st = m.stream || '';
+    S.msgs++; S.lastMsg = Date.now();
+    if (st.endsWith('@bookTicker')) { S.bb = +d.b; S.ba = +d.a; } else if (d && d.e === 'depthUpdate') onDepth(S, d, g);
+  };
+  pub.onclose = () => {
+    if (g !== gen) return;
+    S.status = 'OFFLINE'; S.synced = false; S.reconnects++; OF.emit('status');
+    setTimeout(() => { if (g === gen) { try { mk.onclose = null; mk.close(); } catch (e) {} openFut(g); } }, 2000);
+  };
+  const mk = new WebSocket(FWS_MARKET + '/stream?streams=' + [s + '@aggTrade', s + '@forceOrder'].join('/'));
+  xws.push(mk);
+  mk.onmessage = ev => {
+    if (g !== gen) return;
+    const m = JSON.parse(ev.data), d = m.data, st = m.stream || '';
+    S.msgs++; S.lastMsg = Date.now();
+    if (st.endsWith('@aggTrade')) {
+      onTrade(S, d);
+      const n = +d.p * +d.q, buy = !d.m; S.futFlow.push({ t: d.T, n, buy, p: +d.p }); S.fcvd += buy ? n : -n;
+      if (S.futFlow.length > 60000) S.futFlow.splice(0, 15000);
+    } else if (st.endsWith('@forceOrder') && d.o) {
+      // a SELL liquidation order closes a long, a BUY closes a short
+      const o = d.o, p = +(o.ap || o.p), q = +(o.z || o.q);
+      S.liqs.unshift({ t: +o.T, side: o.S === 'SELL' ? 'long' : 'short', p, n: p * q });
+      if (S.liqs.length > 500) S.liqs.length = 500;
+    }
+  };
+}
+async function pollPremium(g) {
+  const S = OF.S;
+  try {
+    const [pi, oi] = await Promise.all([OF.getJ('/fapi/v1/premiumIndex?symbol=' + S.symbol, [FAPI]), OF.getJ('/fapi/v1/openInterest?symbol=' + S.symbol, [FAPI])]);
+    if (g !== gen) return;
+    const f = S.fut; f.available = true;
+    f.mark = +pi.markPrice; f.index = +pi.indexPrice; f.last = S.last || f.mark;
+    f.funding = +pi.lastFundingRate; f.nextFunding = +pi.nextFundingTime;
+    f.oiValue = +oi.openInterest * (f.mark || S.last);
+    const h = f.oiHist, t = OF.now();
+    if (!h.length || t - h[h.length - 1].t > 14000) { h.push({ t, v: f.oiValue, p: f.mark || S.last }); if (h.length > 2000) h.shift(); }
+    OF.emit('fut');
+  } catch (e) { /* funding / OI are optional */ }
+}
+
 async function resync(g) {
   const S = OF.S; S.synced = false; S.buffering = true; S.buf = [];
   try {
@@ -165,6 +239,19 @@ function onDepth(S, d, g) {
 /* Binance diff-depth rules: drop u <= lastUpdateId; the first applied event must straddle
    lastUpdateId+1; after that every event's U must equal the previous u + 1, or we resync. */
 function applyDepth(S, d, g) {
+  if (S.mkt === 'fut') {
+    /* USDⓈ-M rules: drop u < lastUpdateId; the first event must have U <= lastUpdateId <= u;
+       after that each event's pu must equal the previous event's u, or we resync. */
+    if (d.u < S.lastId) return true;
+    if (!S.synced) {
+      if (d.U <= S.lastId && d.u >= S.lastId) { S.synced = true; S.status = 'LIVE'; OF.emit('status'); }
+      else { resync(g); return false; }
+    } else if (d.pu !== S.lastId) { S.resyncs++; S.status = 'SYNCING'; OF.emit('status'); resync(g); return false; }
+    S.lastId = d.u;
+    const t = d.E || OF.now();
+    upd(S, S.bids, d.b, 'bid', t); upd(S, S.asks, d.a, 'ask', t);
+    return true;
+  }
   if (d.u <= S.lastId) return true;
   if (!S.synced) {
     if (d.U <= S.lastId + 1 && d.u >= S.lastId + 1) { S.synced = true; S.status = 'LIVE'; OF.emit('status'); }
@@ -514,9 +601,20 @@ OF.loadGamma = async function (force) {
 };
 
 /* ---------- market list for the symbol picker ---------- */
+OF.loadMetals = async function () {
+  const out = [];
+  await Promise.all(Object.entries(OF.METALS).map(async ([symbol, m]) => {
+    try {
+      const r = await OF.getJ((m.mkt === 'fut' ? '/fapi/v1' : '/api/v3') + '/ticker/24hr?symbol=' + symbol, m.mkt === 'fut' ? [FAPI] : SPOT_REST);
+      out.push({ symbol, base: symbol.slice(0, -4), name: m.name, metal: m.sym, note: m.note, last: +r.lastPrice, chg: (+r.lastPrice / +r.openPrice - 1) * 100 });
+    } catch (e) { out.push({ symbol, base: symbol.slice(0, -4), name: m.name, metal: m.sym, note: m.note, last: null, chg: 0 }); }
+  }));
+  OF._metals = Object.keys(OF.METALS).map(s => out.find(x => x.symbol === s));
+  return OF._metals;
+};
 OF.loadMarkets = async function () {
   if (OF._markets) return OF._markets;
-  const rows = await OF.getJ('/api/v3/ticker/24hr?type=MINI');
+  const rows = await OF.getJ('/api/v3/ticker/24hr?type=MINI', SPOT_REST);
   OF._markets = rows.filter(r => r.symbol.endsWith('USDT') && +r.quoteVolume > 0)
     .map(r => ({ symbol: r.symbol, base: r.symbol.slice(0, -4), last: +r.lastPrice, chg: (+r.lastPrice / +r.openPrice - 1) * 100, qv: +r.quoteVolume }))
     .sort((a, b) => b.qv - a.qv);

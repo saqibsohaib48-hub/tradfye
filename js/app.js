@@ -23,7 +23,8 @@ function buildHeader() {
   $('symBtn').onclick = async () => {
     const m = $('symMenu'); m.classList.toggle('hidden'); if (m.classList.contains('hidden')) return;
     $('symSearch').value = ''; $('symSearch').focus(); renderSyms();
-    try { await OF.loadMarkets(); renderSyms(); } catch (e) { $('symList').innerHTML = '<div class="muted pad">Could not load markets</div>'; }
+    OF.loadMetals().then(renderSyms).catch(() => {});
+    try { await OF.loadMarkets(); renderSyms(); } catch (e) { OF._mktErr = true; renderSyms(); }
   };
   $('symSearch').oninput = renderSyms;
   $('symSearch').onkeydown = e => { if (e.key === 'Enter') { const f = $('symList').querySelector('[data-s]'); if (f) pick(f.dataset.s); } if (e.key === 'Escape') $('symMenu').classList.add('hidden'); };
@@ -32,8 +33,11 @@ function buildHeader() {
 function renderSyms() {
   const q = $('symSearch').value.trim().toUpperCase(), rec = LS.get('recent', []);
   const list = (OF._markets || []).filter(m => !q || m.base.includes(q)).slice(0, 80);
-  $('symList').innerHTML = (rec.length && !q ? '<div class="rec">' + rec.map(s => `<button data-s="${s}">${s.replace(/USDT$/, '')}</button>`).join('') + '</div>' : '') +
-    (list.length ? list.map(m => `<div class="srow" data-s="${m.symbol}"><b>${m.base}</b><span class="mono">${m.last}</span><span class="mono ${m.chg >= 0 ? 'g' : 'r'}">${m.chg >= 0 ? '+' : ''}${m.chg.toFixed(2)}%</span></div>`).join('') : '<div class="muted pad">Loading markets…</div>');
+  const met = (OF._metals || Object.entries(OF.METALS).map(([symbol, m]) => ({ symbol, base: symbol.slice(0, -4), name: m.name, metal: m.sym, note: m.note, last: null, chg: 0 })))
+    .filter(m => !q || (m.base + ' ' + m.name + ' GOLD SILVER METAL').toUpperCase().includes(q));
+  const metHtml = met.length ? `<div class="mhead">Metals</div>` + met.map(m => `<div class="srow metal" data-s="${m.symbol}"><b><span class="mcoin ${m.metal === 'Ag' ? 'ag' : 'au'}">${m.metal}</span>${m.name} <small>${m.base}</small></b><span class="mono">${m.last != null ? m.last : ''}</span><span class="mono ${m.chg >= 0 ? 'g' : 'r'}">${m.last != null ? (m.chg >= 0 ? '+' : '') + m.chg.toFixed(2) + '%' : ''}</span><div class="mnote">${m.note}</div></div>`).join('') + `<div class="mhead">Crypto</div>` : '';
+  $('symList').innerHTML = (rec.length && !q ? '<div class="rec">' + rec.map(s => `<button data-s="${s}">${s.replace(/USDT$/, '')}</button>`).join('') + '</div>' : '') + metHtml +
+    (OF._mktErr && !list.length ? '<div class="muted pad">Could not load the crypto list — gold and silver above still work.</div>' : '') + (list.length ? list.map(m => `<div class="srow" data-s="${m.symbol}"><b>${m.base}</b><span class="mono">${m.last}</span><span class="mono ${m.chg >= 0 ? 'g' : 'r'}">${m.chg >= 0 ? '+' : ''}${m.chg.toFixed(2)}%</span></div>`).join('') : '<div class="muted pad">Loading markets…</div>');
   $('symList').querySelectorAll('[data-s]').forEach(x => x.onclick = () => pick(x.dataset.s));
 }
 function pick(sym) {
@@ -42,7 +46,10 @@ function pick(sym) {
   LS.set('symbol', sym); startSymbol(sym);
 }
 function startSymbol(sym) {
-  $('symBtn').textContent = sym.replace(/USDT$/, '/USDT') + ' ▾';
+  const metal = OF.METALS[sym];
+  $('symBtn').textContent = (metal ? metal.name.toUpperCase() + ' · ' : '') + sym.replace(/USDT$/, '/USDT') + ' ▾';
+  $('coin').textContent = metal ? metal.sym : sym.replace(/USDT$/, '').slice(0, 1);
+  $('coin').className = 'coin' + (metal ? (metal.sym === 'Ag' ? ' ag' : ' au') : '');
   OF.start(sym).then(() => { if (!OF.S.info) return; ['1m', '5m', '15m', '30m', '1h', '4h', '12h', '1d'].forEach(tf => OF.loadKlines(tf)); });
   mountView(true);
 }
@@ -61,16 +68,34 @@ function updateHeader() {
   $('qAgo').textContent = ago > 30 ? 'last trade ' + (ago < 120 ? Math.round(ago) + 's' : Math.round(ago / 60) + 'm') + ' ago' : '';
   const k = S.k[A.tf], c = k && k[k.length - 1];
   $('stCandle').innerHTML = c ? `${A.tf} candle Δ <b class="${2 * c.bv - c.v >= 0 ? 'g' : 'r'}">${(2 * c.bv - c.v).toFixed(c.v < 10 ? 3 : 1)} ${S.info.base}</b>` : '';
-  $('stCvd').innerHTML = `CVD <b class="${S.cvd >= 0 ? 'g' : 'r'}">${OF.fmtUsd(S.cvd)}</b>` + (S.fut.available ? ` <span title="Perpetual-futures CVD (Bybit) since the page opened">perp <b class="${S.fcvd >= 0 ? 'g' : 'r'}">${OF.fmtUsd(S.fcvd)}</b></span>` : '');
+  $('stCvd').innerHTML = `CVD <b class="${S.cvd >= 0 ? 'g' : 'r'}">${OF.fmtUsd(S.cvd)}</b>` + (S.fut.available && S.mkt !== 'fut' ? ` <span title="Perpetual-futures CVD (Bybit) since the page opened">perp <b class="${S.fcvd >= 0 ? 'g' : 'r'}">${OF.fmtUsd(S.fcvd)}</b></span>` : '');
   const ss = OF.session(); $('stPoc').innerHTML = ss && ss.today ? `POC <b class="y">${OF.fp(ss.today.poc)}</b>` : '';
   document.title = OF.fp(S.last) + ' · ' + S.symbol + ' · FlowDesk';
 }
 
 /* ---------- tabs & views ---------- */
+/* icons for the left menu (inline SVG, drawn with the current text colour) */
+const svg = d => `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${d}</svg>`;
+const TABICON = {
+  chart: svg('<path d="M6 4v16M6 8h-2v6h4V8z"/><path d="M12 3v18M10 7h4v9h-4z"/><path d="M18 6v12M16 9h4v5h-4z"/>'),
+  heatmap: svg('<rect x="3" y="3" width="18" height="18" rx="3"/><path d="M3 9h18M3 15h18M9 3v18M15 3v18"/>'),
+  footprint: svg('<rect x="4" y="3" width="7" height="18" rx="1.5"/><rect x="13" y="6" width="7" height="12" rx="1.5"/><path d="M6.5 8h2M6.5 12h2M6.5 16h2M15.5 10h2M15.5 14h2"/>'),
+  whales: svg('<circle cx="8" cy="14" r="5"/><circle cx="17" cy="8" r="3.2"/><circle cx="18" cy="17" r="2"/>'),
+  profile: svg('<path d="M4 4v16"/><path d="M4 6h7M4 10h13M4 14h16M4 18h9"/>'),
+  tpo: svg('<path d="M4 20V4M4 20h16"/><path d="M8 16h2M8 12h6M8 8h3"/><circle cx="17" cy="12" r="1"/>'),
+  gamma: svg('<path d="M6 4h12M8 4v16"/><path d="M14 10c2 3 4 6 4 10"/>'),
+  tape: svg('<path d="M4 6h16M4 10h16M4 14h10M4 18h13"/>'),
+  liquidity: svg('<path d="M12 3l9 5-9 5-9-5 9-5z"/><path d="M3 13l9 5 9-5"/>'),
+  futures: svg('<path d="M3 17l6-6 4 4 8-8"/><path d="M15 7h6v6"/>'),
+  sentiment: svg('<path d="M4 16a8 8 0 0 1 16 0"/><path d="M12 16l4-5"/><circle cx="12" cy="16" r="1.4"/>'),
+  plan: svg('<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/>'),
+  guide: svg('<path d="M5 4h10a4 4 0 0 1 4 4v12H9a4 4 0 0 1-4-4z"/><path d="M5 16a4 4 0 0 1 4-4h10"/>')
+};
+const TABSHORT = { profile: 'Profile', liquidity: 'L3', plan: 'Trade plan' };
 function buildTabs() {
   const t = $('tabs'); t.innerHTML = '';
   ORDER.forEach((id, i) => {
-    const v = OF.views[id], b = el('button', id === A.view ? 'on' : '', v.label);
+    const v = OF.views[id], b = el('button', id === A.view ? 'on' : '', `<i>${TABICON[id] || '•'}</i><span>${TABSHORT[id] || v.label}</span>`);
     b.title = v.title + (i < 10 ? ' (key ' + ((i + 1) % 10) + ')' : '');
     b.onclick = () => setView(id); t.appendChild(b);
   });

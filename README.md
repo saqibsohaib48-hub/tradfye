@@ -9,9 +9,24 @@ A single-page terminal that runs entirely in your browser from free public excha
 **Right panel:** Decision (BUY / SELL / WAIT from the order-flow meters, with trigger levels) + DOM ladder + mini tape.
 **Keys:** `1`–`9`, `0` switch tabs · `P` shows / hides the right panel.
 
+## Design
+Neon Pulse theme (`css/theme.css`, loaded after `css/style.css`): left icon menu, glass panels with gradient borders, pill controls, neon chart colours (`js/ui.js` → `OF.C` and the heatmap palette). Remove the `theme.css` line in `index.html` to go back to the plain look.
+
+## HTF Support/Resistance + Weekly Bias Filter
+`js/htfsr.js` is a JavaScript port of the TradingView indicator “HTF Support/Resistance + Weekly Bias Filter” (© BigBeluga, original; modified with the Level 4 weekly bias filter). Same four levels and defaults (240 len 4, 720 len 5, D len 5, W len 5), non-repainting pivots, shadow lines, labels, touch markers, W SUP / W RES signals, background tint, status box and alerts. Turn it on with **HTF S/R** on the Chart tab; ⚙ opens the same settings as the script. It is also drawn on the Trade plan chart.
+
+That code is licensed **CC BY-NC-SA 4.0** (https://creativecommons.org/licenses/by-nc-sa/4.0/): keep the attribution, share changes under the same licence, and do not use it commercially.
+
+## Gold and silver
+Open the symbol menu (top-left) → **Metals**:
+- **Gold · XAUUSDT** and **Silver · XAGUSDT**: Binance USDⓈ-M TradFi perpetuals (launched January 2026, trade 24/7, settled in USDT). Order book, trades, funding, open interest and liquidations all come from Binance futures, using the websocket paths Binance requires since 2026-04-23 (`wss://fstream.binance.com/public` for the book and best bid/ask, `/market` for trades and liquidations). The underlying metal market closes at weekends and holidays; the perpetual keeps trading and its index price pauses at the last value.
+- **Gold token · PAXGUSDT**: PAX Gold on Binance spot (1 token = 1 troy ounce).
+Every tab works for the metals. Options gamma is not available (no Deribit options on metals), and the Bybit/OKX wall cross-check and Coinbase premium are crypto-only.
+
 ## Data sources
 | What | Source |
 |---|---|
+| Gold / silver: order book (1,000 levels, 100 ms diffs), trades, liquidations, funding, open interest, candles | Binance USDⓈ-M futures public API (`fapi.binance.com`, `fstream.binance.com/public` and `/market`) |
 | Order book (5,000 levels, 100 ms diffs), trades, best bid/ask, candles | Binance spot public API (`data-api.binance.vision`, falls back to `api.binance.com`) |
 | Funding, open interest, mark price, liquidations, futures trades | Bybit USDT perpetual public websocket |
 | Liquidation-map open-interest history | Binance USDT-M futures public REST (optional) |

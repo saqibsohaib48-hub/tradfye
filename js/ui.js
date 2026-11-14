@@ -3,8 +3,9 @@
 'use strict';
 const OF = window.OF;
 const C = OF.C = {
-  bg: '#0a0d12', panel: '#0f141b', grid: '#1a212c', text: '#c9d1d9', muted: '#7d8590', faint: '#4b5563',
-  buy: '#22c55e', sell: '#ef4444', buyA: 'rgba(34,197,94,', sellA: 'rgba(239,68,68,', amber: '#f59e0b', blue: '#38bdf8', purple: '#a78bfa', yellow: '#facc15'
+  // Neon Pulse palette (css/theme.css)
+  bg: '#10062a', panel: '#160935', grid: 'rgba(255,255,255,.055)', text: '#f0e6ff', muted: '#a58cc4', faint: '#5d4a80',
+  buy: '#00ffa3', sell: '#ff3b6b', buyA: 'rgba(0,255,163,', sellA: 'rgba(255,59,107,', amber: '#ffb84d', blue: '#00e5ff', purple: '#c084fc', yellow: '#ffd166'
 };
 const el = OF.el = (tag, cls, html) => { const e = document.createElement(tag); if (cls) e.className = cls; if (html != null) e.innerHTML = html; return e; };
 OF.ui = {};
@@ -115,7 +116,7 @@ OF.ui.cross = (ctx, m, x0, x1, top, h, lo, hi, axisX, timeAt) => {
 OF.ui.msg = (ctx, w, h, text) => { ctx.fillStyle = C.muted; ctx.font = '13px system-ui,sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(text, w / 2, h / 2); };
 
 /* heatmap palette: deep navy → blue → cyan → yellow → near-white */
-const stops = [[0, [8, 20, 40]], [0.25, [14, 58, 120]], [0.5, [28, 120, 205]], [0.7, [52, 190, 230]], [0.86, [245, 220, 90]], [1, [255, 250, 225]]];
+const stops = [[0, [16, 6, 42]], [0.22, [52, 18, 120]], [0.45, [128, 38, 200]], [0.66, [255, 43, 214]], [0.84, [0, 229, 255]], [1, [235, 255, 255]]];
 OF.heatLUT = Array.from({ length: 256 }, (_, i) => {
   const v = i / 255; let a = stops[0], b = stops[stops.length - 1];
   for (let j = 0; j < stops.length - 1; j++) if (v >= stops[j][0] && v <= stops[j + 1][0]) { a = stops[j]; b = stops[j + 1]; break; }
