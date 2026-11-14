@@ -197,3 +197,32 @@ select option{background:#14062c}
 /* the symbol menu drops out of the header: the header must not clip it and must sit above the panels below */
 .top{overflow:visible;position:relative;z-index:30}
 .menu{z-index:60;max-height:70vh;overflow:auto}
+
+/* ---------- ⛶ full screen chart (F / Esc) ---------- */
+.main{position:relative}
+.fsbtn{position:absolute;right:12px;bottom:14px;z-index:25;width:38px;height:38px;border-radius:12px;font-size:18px;color:#fff;
+  background:var(--grad);box-shadow:0 6px 22px rgba(255,43,214,.4);opacity:.85;transition:opacity .15s,transform .15s}
+.fsbtn:hover{opacity:1;transform:scale(1.06)}
+.fsbar{display:none}
+body.chartonly #shell{grid-template-columns:1fr;padding:0;gap:0}
+body.chartonly .rail,body.chartonly .top,body.chartonly #mtf,body.chartonly #keyread,body.chartonly .brandbar,
+body.chartonly .work>.panel,body.chartonly .vtab,body.chartonly #reading,body.chartonly .fsbtn{display:none!important}
+body.chartonly #toolbar{display:none}
+body.chartonly.fstools #toolbar{display:flex!important;position:absolute;top:50px;left:12px;right:12px;z-index:26;border-radius:14px;
+  background:rgba(16,6,36,.94);border:1px solid rgba(255,43,214,.35);box-shadow:0 18px 50px rgba(0,0,0,.55);backdrop-filter:blur(16px)}
+body.chartonly #app{gap:0;height:100dvh}
+body.chartonly .work{grid-template-columns:minmax(0,1fr)!important;gap:0}
+body.chartonly .work>.main{border-radius:0;border:0;box-shadow:none}
+body.chartonly .fsbar{display:flex;align-items:center;gap:10px;position:absolute;top:8px;right:10px;z-index:27;padding:5px 6px 5px 14px;border-radius:999px;
+  background:rgba(16,6,36,.86);border:1px solid rgba(255,43,214,.35);backdrop-filter:blur(14px);box-shadow:0 8px 30px rgba(0,0,0,.45)}
+.fssym{font-weight:700;font-size:12px;color:var(--muted)}
+.fspx{font-weight:800;font-size:15px;background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
+.fsbar button{border-radius:999px;padding:5px 12px;font-size:12px;font-weight:700;border:1px solid var(--line);color:var(--text)}
+.fsbar button:hover{background:rgba(255,255,255,.07)}
+#fsExit{background:var(--grad);color:#0b0b10;border:0}
+/* views that wrap their chart in cards: keep only the chart */
+body.chartonly .view.scroll{padding:0;overflow:hidden;display:flex;flex-direction:column}
+body.chartonly .view .cards,body.chartonly #plMain,body.chartonly #plSide,body.chartonly #plFactors,body.chartonly .fuside{display:none!important}
+body.chartonly .plgrid,body.chartonly .fuwrap{flex:1;min-height:0;grid-template-columns:minmax(0,1fr)!important;margin:0;gap:0;height:auto}
+body.chartonly .plchart,body.chartonly .gbox{height:100%!important;min-height:0;border:0;border-radius:0}
+body.chartonly #plFocus .fbar{margin:0;border-radius:0}

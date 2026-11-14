@@ -110,6 +110,7 @@ function mountView() {
   if (v.c) v.c = null;
   v.toolbar && v.toolbar(tb); v.mount(box); cur = v;
   $('reading').innerHTML = ''; $('reading').style.display = v.reading ? '' : 'none';
+  fsButton(); if (NOCHART[A.view] && document.body.classList.contains('chartonly')) chartOnly(false);
   ui.tip();
   tick(true);
 }
@@ -202,7 +203,7 @@ let n = 0;
 function tick(force) {
   n++;
   const S = OF.S; if (!S) return;
-  if (force || n % 4 === 0) { try { OF.lastDecision = OF.decision(); } catch (e) { console.error(e); } updateHeader(); try { renderMtf(); } catch (e) { console.error(e); } try { renderKeyRead(); } catch (e) { console.error(e); } }
+  if (force || n % 4 === 0) { try { OF.lastDecision = OF.decision(); } catch (e) { console.error(e); } updateHeader(); fsBar(); try { renderMtf(); } catch (e) { console.error(e); } try { renderKeyRead(); } catch (e) { console.error(e); } }
   if (n % 20 === 0) { try { OF.views.plan.autoTick(); } catch (e) { console.error(e); } }
   const v = cur; if (!v) return;
   const isCanvas = !!v.c;
@@ -215,20 +216,47 @@ function tick(force) {
 const HIDE = [['brand', 'Brand bar', '.brandbar'], ['mtf', 'Market direction bar', '#mtf'], ['kr', 'Key points strip', '#keyread'], ['read', 'Explanation line under the toolbar', '#reading'], ['tb', 'Tool bar (span, range, columns…)', '#toolbar'], ['stats', 'Candle Δ / CVD / POC in the tab bar', '.stats .mono']];
 function applyHide() { const h = LS.get('hide', {}); HIDE.forEach(([k]) => document.body.classList.toggle('hide-' + k, !!h[k])); setTimeout(() => tick(true), 0); }
 function setFull(on) { const h = {}; if (on) HIDE.forEach(([k]) => { if (k !== 'tb') h[k] = true; }); LS.set('hide', h); A.panel = !on; applyPanel(); applyHide(); }
+/* ---------- full screen chart: only the chart, nothing else ---------- */
+const NOCHART = { tape: 1, liquidity: 1, sentiment: 1, guide: 1 };     // views without a chart to enlarge
+function chartOnly(on) {
+  if (on && NOCHART[A.view]) return;
+  document.body.classList.toggle('chartonly', !!on);
+  document.body.classList.remove('fstools');
+  if (on) { const d = document.documentElement; if (!document.fullscreenElement && d.requestFullscreen) d.requestFullscreen().catch(() => {}); }
+  else if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(() => {});
+  setTimeout(() => tick(true), 30); setTimeout(() => tick(true), 300);
+}
+OF.app.chartOnly = chartOnly;
+document.addEventListener('fullscreenchange', () => { if (!document.fullscreenElement && document.body.classList.contains('chartonly')) chartOnly(false); setTimeout(() => tick(true), 50); });
+function fsButton() { $('fsBtn').style.display = NOCHART[A.view] ? 'none' : ''; }
+function fsBar() {
+  if (!document.body.classList.contains('chartonly') || !OF.S) return;
+  const m = OF.METALS && OF.METALS[OF.S.symbol];
+  $('fsSym').textContent = (m ? m.name.toUpperCase() + ' · ' : '') + OF.S.symbol.replace(/USDT$/, '/USDT') + ' · ' + OF.views[A.view].label;
+  $('fsPx').textContent = OF.fp(OF.S.last);
+}
+
 function viewMenu() {
   let pop = $('viewPop'); if (pop) { pop.remove(); return; }
   const h = LS.get('hide', {}); pop = el('div', 'colspop viewpop'); pop.id = 'viewPop';
-  const r = $('viewBtn').getBoundingClientRect(); pop.style.top = (r.bottom + 6) + 'px'; pop.style.left = Math.max(8, r.right - 300) + 'px'; pop.style.width = '300px';
+  pop.style.width = '300px'; pop.style.visibility = 'hidden';
   pop.innerHTML = '<div class="cph">Show on screen</div>' + HIDE.map(([k, t]) => `<label class="vrow"><input type="checkbox" data-k="${k}" ${h[k] ? '' : 'checked'}> ${t}</label>`).join('') +
     `<label class="vrow"><input type="checkbox" data-k="panel" ${A.panel ? 'checked' : ''}> Right panel (Decision + DOM) <span class="muted sm">P</span></label>
-     <div class="vbtns"><button data-a="full">⛶ Full chart view <span class="muted sm">F</span></button><button data-a="all">Show everything</button></div>`;
+     <div class="vbtns"><button data-a="full">⛶ Full screen chart <span class="muted sm">F</span></button><button data-a="all">Show everything</button></div>
+     <div class="vbtns"><button data-a="tidy">Hide the strips (keep tabs)</button></div>`;
   pop.querySelectorAll('input').forEach(i => i.onchange = () => {
     if (i.dataset.k === 'panel') { A.panel = i.checked; applyPanel(); setTimeout(() => tick(true), 0); return; }
     const hh = LS.get('hide', {}); hh[i.dataset.k] = !i.checked; LS.set('hide', hh); applyHide();
   });
-  pop.querySelector('[data-a=full]').onclick = () => { setFull(true); pop.remove(); };
-  pop.querySelector('[data-a=all]').onclick = () => { setFull(false); pop.remove(); };
+  pop.querySelector('[data-a=full]').onclick = () => { pop.remove(); chartOnly(true); };
+  pop.querySelector('[data-a=all]').onclick = () => { chartOnly(false); setFull(false); pop.remove(); };
+  pop.querySelector('[data-a=tidy]').onclick = () => { setFull(true); pop.remove(); };
   document.body.appendChild(pop);
+  { const r = $('viewBtn').getBoundingClientRect(), H = window.innerHeight, ph = Math.min(pop.offsetHeight, H - 16), side = r.left < 200;
+    pop.style.maxHeight = (H - 16) + 'px'; pop.style.overflowY = 'auto';
+    pop.style.left = (side ? r.right + 10 : Math.max(8, r.right - 300)) + 'px';
+    pop.style.top = (side ? OF.clamp(r.bottom - ph, 8, H - ph - 8) : Math.min(r.bottom + 6, H - ph - 8)) + 'px';
+    pop.style.visibility = ''; }
   setTimeout(() => document.addEventListener('pointerdown', function f(e) { if (!pop.contains(e.target) && e.target !== $('viewBtn')) { pop.remove(); document.removeEventListener('pointerdown', f); } }), 0);
 }
 
@@ -236,7 +264,8 @@ function viewMenu() {
 document.addEventListener('keydown', e => {
   if (e.ctrlKey || e.metaKey || e.altKey || (e.target && e.target.closest && e.target.closest('input,select,textarea'))) return;
   if (e.key === 'p' || e.key === 'P') { A.panel = !A.panel; applyPanel(); setTimeout(() => tick(true), 0); return; }
-  if (e.key === 'f' || e.key === 'F') { const h = LS.get('hide', {}); setFull(!(h.mtf && h.kr && h.read)); return; }
+  if (e.key === 'f' || e.key === 'F') { chartOnly(!document.body.classList.contains('chartonly')); return; }
+  if (e.key === 'Escape' && document.body.classList.contains('chartonly')) { chartOnly(false); e.stopImmediatePropagation(); return; }
   if (/^[0-9]$/.test(e.key)) { const i = e.key === '0' ? 9 : +e.key - 1; if (ORDER[i]) setView(ORDER[i]); }
 });
 
@@ -280,6 +309,9 @@ window.addEventListener('DOMContentLoaded', () => {
   OF.demo = /[?&]demo=1/.test(location.search);
   buildHeader(); buildTabs(); applyPanel();
   $('panelBtn').onclick = $('vtab').onclick = () => { A.panel = !A.panel; applyPanel(); };
+  $('fsBtn').onclick = () => chartOnly(true);
+  $('fsExit').onclick = () => chartOnly(false);
+  $('fsTools').onclick = () => { document.body.classList.toggle('fstools'); setTimeout(() => tick(true), 30); };
   applyHide(); $('viewBtn').onclick = viewMenu;
   const sym = (new URLSearchParams(location.search).get('symbol') || LS.get('symbol', 'BTCUSDT')).toUpperCase();
   startSymbol(sym);
