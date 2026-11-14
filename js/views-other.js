@@ -4,6 +4,32 @@
 const OF = window.OF, C = OF.C, el = OF.el, ui = OF.ui, LS = OF.LS;
 
 /* ===================== VOLUME PROFILE ===================== */
+/* Buy / sell split of the volume profile.
+   Bought = volume traded by aggressive buyers (market buys lifting the ask), sold = aggressive sellers.
+   Each candle's taker-buy share is spread over the prices it traded, so per-row values are estimates; zones are steadier. */
+const share = (b, s) => { const t = b + s; return t ? { b, s, t, buy: b / t, d: (b - s) / t } : { b: 0, s: 0, t: 0, buy: .5, d: 0 }; };
+function bsStats(p) {
+  const sum = rows => { let b = 0, s = 0; for (const r of rows) { b += r.b; s += r.s; } return share(b, s); };
+  const pi = p.rows.findIndex(r => p.poc >= r.p && p.poc < r.p + p.bin), R = p.rows;
+  return {
+    pocRow: sum(R.slice(pi, pi + 1)),
+    pocZone: sum(R.slice(Math.max(0, pi - 2), pi + 3)),                       // POC row ± 2 rows
+    va: sum(R.filter(r => r.p >= p.val && r.p < p.vah)),
+    above: sum(R.filter(r => r.p >= p.poc)), below: sum(R.filter(r => r.p + p.bin <= p.poc)),
+    vah: sum(R.filter(r => r.p >= p.vah - 2 * p.bin && r.p < p.vah + p.bin)), val: sum(R.filter(r => r.p >= p.val - p.bin && r.p < p.val + 2 * p.bin)),
+    all: sum(R)
+  };
+}
+const pct = x => Math.round(x * 100) + '%';
+const side = (x, strong) => x.d >= (strong || .1) ? 'buyers' : x.d <= -(strong || .1) ? 'sellers' : 'balanced';
+/* plain-language verdict: who was stronger at the POC, and what that means given where price is now */
+function pocVerdict(p, px) {
+  const z = p.bs.pocZone, above = px > p.poc, who = side(z);
+  if (who === 'buyers') return { cls: 'g', head: `Buyers stronger at the POC (${pct(z.buy)} buys)`, txt: above ? 'Price is above the POC and buyers defended it — the POC tends to act as support while price stays above it.' : 'Buyers were stronger at the POC but price is now below it — a move back up to the POC is likely to meet buying; a failure there turns it into resistance.' };
+  if (who === 'sellers') return { cls: 'r', head: `Sellers stronger at the POC (${pct(1 - z.buy)} sells)`, txt: !above ? 'Price is below the POC and sellers defended it — the POC tends to act as resistance while price stays below it.' : 'Sellers were stronger at the POC but price is now above it — a pullback to the POC may meet selling; holding above it would show buyers absorbed them.' };
+  return { cls: 'y', head: `Balanced at the POC (${pct(z.buy)} buys / ${pct(1 - z.buy)} sells)`, txt: 'Neither side dominated at the POC — expect two-way trade around it; wait for price to leave the value area with one side in control.' };
+}
+
 OF.views.profile = {
   label: 'Vol profile', title: 'Volume profile — traded volume by price, with value area',
   o: Object.assign({ range: 'day', split: true }, LS.get('vp', {})),
@@ -19,12 +45,45 @@ OF.views.profile = {
     let cs = this.o.range === 'day' ? t : this.o.range === 'prev' ? p : this.o.range === '2d' ? p.concat(t) : p.concat(t).filter(c => c.t >= now - (this.o.range === '1h' ? 36e5 : 144e5));
     if (!cs.length) return null;
     let lo = Infinity, hi = -Infinity; for (const c of cs) { lo = Math.min(lo, c.l); hi = Math.max(hi, c.h); }
-    return OF.profileFrom(cs, Math.max(S.info.tick, OF.niceStep((hi - lo) / 90)));
+    const prof = OF.profileFrom(cs, Math.max(S.info.tick, OF.niceStep((hi - lo) / 90)));
+    if (prof) prof.bs = bsStats(prof);
+    return prof;
   },
   reading() {
     const p = this.prof(), S = OF.S; if (!p) return 'Loading session candles…';
     const where = S.last > p.vah ? 'above the value area — buyers are pushing into new prices' : S.last < p.val ? 'below the value area — sellers are pushing into new prices' : 'inside the value area — two-way, balanced trade';
-    return `POC <b class="y">${OF.fp(p.poc)}</b> · value area ${OF.fp(p.val)}–${OF.fp(p.vah)} (70% of ${OF.fmtUsd(p.tot)}). Price is ${where}.`;
+    const v = pocVerdict(p, S.last), z = p.bs.pocZone;
+    return `POC <b class="y">${OF.fp(p.poc)}</b> · <b class="g">buy ${pct(z.buy)}</b> / <b class="r">sell ${pct(1 - z.buy)}</b> · value area ${OF.fp(p.val)}–${OF.fp(p.vah)} (70% of ${OF.fmtUsd(p.tot)}). Price is ${where}. <b class="${v.cls}">${v.head}.</b> ${v.txt} This shows who was more aggressive, not a guarantee.`;
+  },
+  /* "Who controls" card, top right of the profile */
+  drawCard(ctx, p, pw, H, Y) {
+    const B = p.bs, S = OF.S, v = pocVerdict(p, S.last), W = 330, x = pw - W - 12; let y = 12;
+    const rows = [['At the POC (±2 rows)', B.pocZone, true], ['POC row only', B.pocRow], ['Value area (70%)', B.va], ['Above the POC', B.above], ['Below the POC', B.below], ['Whole range', B.all]];
+    // wrap the verdict first so the card is tall enough for it
+    ctx.save(); ctx.font = '11px Inter,system-ui,sans-serif';
+    const lines = []; { let line = ''; for (const w of v.txt.split(' ')) { const t = line ? line + ' ' + w : w; if (ctx.measureText(t).width > W - 28) { lines.push(line); line = w; } else line = t; } if (line) lines.push(line); }
+    const Hh = 58 + rows.length * 26 + lines.length * 14 + 30;
+    // keep the POC, VAH and VAL labels visible: use whichever corner (top or bottom) covers fewer of them
+    const keys = [p.poc, p.vah, p.val].map(Y), hits = top => keys.filter(k => k > top - 34 && k < top + Hh + 10).length;
+    const yb = H - Hh - 58; if (hits(12) > hits(yb) || (hits(12) && hits(12) === hits(yb) && Math.abs(keys[0] - 12) < Math.abs(keys[0] - yb))) y = yb;
+    ctx.fillStyle = 'rgba(16,6,36,.93)'; ctx.strokeStyle = 'rgba(255,43,214,.45)'; ctx.lineWidth = 1; ctx.beginPath(); ctx.roundRect(x, y, W, Hh, 14); ctx.fill(); ctx.stroke();
+    ctx.textBaseline = 'middle'; ctx.textAlign = 'left';
+    ctx.font = 'bold 11px Inter,system-ui,sans-serif'; ctx.fillStyle = '#ff8ae9'; ctx.fillText('WHO CONTROLS · BUY vs SELL', x + 14, y + 18);
+    ctx.font = 'bold 13px Inter,system-ui,sans-serif'; ctx.fillStyle = v.cls === 'g' ? C.buy : v.cls === 'r' ? C.sell : C.yellow; ctx.fillText(v.head, x + 14, y + 40);
+    rows.forEach(([name, z, main], i) => {
+      const ry = y + 62 + i * 26, bx = x + 146, bwid = 92;
+      ctx.font = (main ? 'bold ' : '') + '11.5px Inter,system-ui,sans-serif'; ctx.fillStyle = main ? '#fff' : C.muted; ctx.textAlign = 'left'; ctx.fillText(name, x + 14, ry);
+      ctx.fillStyle = C.sell; ctx.beginPath(); ctx.roundRect(bx, ry - 4, bwid, 8, 4); ctx.fill();
+      ctx.fillStyle = C.buy; ctx.beginPath(); ctx.roundRect(bx, ry - 4, Math.max(4, bwid * z.buy), 8, 4); ctx.fill();
+      ctx.fillStyle = '#fff'; ctx.fillRect(bx + bwid / 2 - .5, ry - 6, 1, 12);
+      ctx.font = 'bold 11.5px Inter,system-ui,sans-serif'; ctx.textAlign = 'right';
+      ctx.fillStyle = z.d >= .1 ? C.buy : z.d <= -.1 ? C.sell : C.yellow; ctx.fillText(`${pct(z.buy)} / ${pct(1 - z.buy)}`, x + W - 14, ry);
+    });
+    // the verdict text, wrapped
+    ctx.font = '11px Inter,system-ui,sans-serif'; ctx.fillStyle = '#d8c8f0'; ctx.textAlign = 'left';
+    lines.forEach((l, i) => ctx.fillText(l, x + 14, y + 62 + rows.length * 26 + 4 + i * 14));
+    ctx.font = '10px Inter,system-ui,sans-serif'; ctx.fillStyle = C.muted; ctx.textAlign = 'right'; ctx.fillText('green = buy %  ·  red = sell %  ·  white tick = 50%', x + W - 14, y + Hh - 10);
+    ctx.restore();
   },
   render() {
     const c = this.c.fit(), ctx = c.ctx, W = c.w, H = c.h, S = OF.S;
@@ -44,13 +103,23 @@ OF.views.profile = {
         ctx.fillStyle = inVA ? 'rgba(34,197,94,.75)' : 'rgba(34,197,94,.4)'; ctx.fillRect(ws, y, wb, h);
       } else { ctx.fillStyle = inVA ? 'rgba(56,189,248,.75)' : 'rgba(56,189,248,.35)'; ctx.fillRect(0, y, r.v / mx * bw, h); }
     }
-    ui.hline(ctx, 0, pw, Y(p.poc), C.yellow, [], 'POC ' + OF.fp(p.poc), pw * 0.82);
-    ui.hline(ctx, 0, pw, Y(p.vah), C.blue, [4, 3], 'VAH ' + OF.fp(p.vah), pw * 0.82);
-    ui.hline(ctx, 0, pw, Y(p.val), C.blue, [4, 3], 'VAL ' + OF.fp(p.val), pw * 0.82);
+    const B = p.bs;
+    ui.hline(ctx, 0, pw, Y(p.vah), C.blue, [4, 3], `VAH ${OF.fp(p.vah)} · B ${pct(B.vah.buy)} / S ${pct(1 - B.vah.buy)}`, pw * 0.70);
+    ui.hline(ctx, 0, pw, Y(p.val), C.blue, [4, 3], `VAL ${OF.fp(p.val)} · B ${pct(B.val.buy)} / S ${pct(1 - B.val.buy)}`, pw * 0.70);
+    // POC: thicker line, a big label with the buy / sell split and a split bar
+    { const y = Y(p.poc), z = B.pocZone, t = `POC ${OF.fp(p.poc)}   BUY ${pct(z.buy)}  ·  SELL ${pct(1 - z.buy)}`;
+      ctx.save(); ctx.strokeStyle = C.yellow; ctx.lineWidth = 2; ctx.shadowColor = C.yellow; ctx.shadowBlur = 8; ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(pw, y); ctx.stroke(); ctx.restore();
+      ctx.font = 'bold 12px Inter,system-ui,sans-serif'; const tw = ctx.measureText(t).width + 18, lx = OF.clamp(pw * 0.70 - 4, 4, pw - tw - 4), ly = OF.clamp(y - 30, 6, H - 40);
+      ctx.fillStyle = 'rgba(16,6,36,.94)'; ctx.strokeStyle = C.yellow; ctx.beginPath(); ctx.roundRect(lx, ly, tw, 26, 7); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = C.yellow; ctx.textAlign = 'left'; ctx.textBaseline = 'middle'; ctx.fillText(`POC ${OF.fp(p.poc)}`, lx + 9, ly + 10);
+      const w1 = ctx.measureText(`POC ${OF.fp(p.poc)}   `).width; ctx.fillStyle = C.buy; ctx.fillText(`BUY ${pct(z.buy)}`, lx + 9 + w1, ly + 10);
+      const w2 = ctx.measureText(`BUY ${pct(z.buy)}  ·  `).width; ctx.fillStyle = C.sell; ctx.fillText(`SELL ${pct(1 - z.buy)}`, lx + 9 + w1 + w2, ly + 10);
+      ctx.fillStyle = C.sell; ctx.fillRect(lx + 9, ly + 19, tw - 18, 3); ctx.fillStyle = C.buy; ctx.fillRect(lx + 9, ly + 19, (tw - 18) * z.buy, 3); }
+    this.drawCard(ctx, p, pw, H, Y);
     const ss = OF.session(); if (ss && ss.vwap && ss.vwap > lo && ss.vwap < hi) ui.hline(ctx, 0, pw, Y(ss.vwap), C.purple, [6, 3], 'VWAP ' + OF.fp(ss.vwap), pw * 0.62);
     if (S.last) { ui.hline(ctx, 0, pw, Y(S.last), '#e5e7eb', [2, 2]); ui.tag(ctx, pw + 1, Y(S.last), OF.fp(S.last), '#e5e7eb', '#000'); }
     const cp = ui.cross(ctx, this.mouse, 0, pw, 10, H - 20, lo, hi, pw + 1);
-    if (cp != null) { const r = p.rows.find(x => cp >= x.p && cp < x.p + p.bin); ui.tip(this.mouse.cx, this.mouse.cy, r ? `<b>${OF.fp(r.p)}</b><br>volume ${OF.fmtUsd(r.v)}<br><span class="g">bought ${OF.fmtUsd(r.b)}</span> · <span class="r">sold ${OF.fmtUsd(r.s)}</span>` : ''); } else ui.tip();
+    if (cp != null) { const r = p.rows.find(x => cp >= x.p && cp < x.p + p.bin); ui.tip(this.mouse.cx, this.mouse.cy, r ? `<b>${OF.fp(r.p)}</b><br>volume ${OF.fmtUsd(r.v)}<br><span class="g">bought ${OF.fmtUsd(r.b)} (${pct(r.b / (r.v || 1))})</span> · <span class="r">sold ${OF.fmtUsd(r.s)} (${pct(r.s / (r.v || 1))})</span>` : ''); } else ui.tip();
   }
 };
 
