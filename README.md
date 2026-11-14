@@ -17,6 +17,16 @@ Neon Pulse theme (`css/theme.css`, loaded after `css/style.css`): left icon menu
 
 That code is licensed **CC BY-NC-SA 4.0** (https://creativecommons.org/licenses/by-nc-sa/4.0/): keep the attribution, share changes under the same licence, and do not use it commercially.
 
+## Meme coins (long-term)
+The **Meme coins** tab (rocket icon) finds every meme coin listed on Binance: CoinGecko's free *meme-token* category (top 250 by market cap) is matched to Binance by **price**, so look-alike tickers are dropped; spot pairs are preferred, perpetual-futures pairs are used when there is no spot pair (including "1000×" pairs). If CoinGecko is unreachable a built-in list of ~40 memes is used instead. Five views:
+- **📋 All meme coins** – price, 24h / 7d / 30d / 90d, 90-day sparkline, volume and volume trend, market cap, distance from the 1-year high, funding, pump score, dump risk and signal. ▶ opens the coin in every terminal tab.
+- **🚀 Pump / dump radar** – the 10 highest scores in an uptrend and the 10 highest dump risks, each with the reasons.
+- **📈 Long-term plans** – three buys (30/30/40%) at real supports (50/200-day averages, 30/90-day and 1-year lows), a stop on a *weekly close* below buy 3 (or the 1-year low when it is close), three targets (90-day high, 1-year high, all-time high) selling a third at each, and a size from your capital, risk % and max % per coin (⚙ Settings). Drawn on a daily log-scale chart.
+- **💼 My investments** – tracked plans followed day by day: buys filled, targets reached (stop to break-even after target 1), weekly-close stop, P&L.
+- **🧪 Score test** – the score replayed every week on history: next 30/90-day moves by score rank, band and signal, and the top 5 vs all memes.
+
+**Pump score (0–100):** trend (price vs its 200- and 50-day averages, 50-day slope) is absolute; 90-day and 30-day momentum, volume growth, buyer share and base/breakout are ranked against the other memes. Weights are in `js/meme.js` → `W`. Penalties: +150% in 30 days, under 120 days old, thin volume, crowded funding. **Dump risk** adds plain red flags. A meme season gauge (share of memes above their long average, memes vs Bitcoin over 30 days) sits on top. Daily data only; meme coins can lose 90%+; the score test only sees coins that still trade (survivorship bias). Not financial advice.
+
 ## Gold and silver
 Open the symbol menu (top-left) → **Metals**:
 - **Gold · XAUUSDT** and **Silver · XAGUSDT**: Binance USDⓈ-M TradFi perpetuals (launched January 2026, trade 24/7, settled in USDT). Order book, trades, funding, open interest and liquidations all come from Binance futures, using the websocket paths Binance requires since 2026-04-23 (`wss://fstream.binance.com/public` for the book and best bid/ask, `/market` for trades and liquidations). The underlying metal market closes at weekends and holidays; the perpetual keeps trading and its index price pauses at the last value.
