@@ -8,19 +8,21 @@
      ±0.15 %, shaded zone (transp 88), only drawn while |closeDiff| > (high − low)·0.02 or |closeDiff| > 0.004.
      Touch alerts when the close crosses an entry line.
 
-   What is different (on purpose, to stop repainting):
-   • Timeframe is a setting: 1 hour, 4 hours, 1 day, 1430 minutes, 1 week, 1 month (Pine default '1430').
-     1430 minutes is built the way TradingView builds it on a 24 h crypto session: each UTC day has one
-     00:00–23:50 candle (1430 min) and one short 23:50–24:00 candle, because bars restart at the session start.
-     On "HTF candle close" timing the 00:00–23:50 candle is compared with the close before it (the previous day's
-     00:00 close), which is the value the script shows on TradingView history — but known at 23:50, not in advance.
-   • "HTF candle close" timing (default) uses ONLY closed higher-timeframe candles, so a signal never changes after
-     it appears. "Chart candle close" timing reacts sooner (today = chart close, like the script in real time) and is
-     final once the chart candle closes.
-   • Every BUY / SELL is checked against FlowDesk data. From candles (known at signal time, never repaints):
-     taker delta, volume vs normal, where the candle closed, chart CVD. From live order flow (for a fresh signal,
-     frozen the first time it is seen): multi-timeframe direction, order-book imbalance, whale net, futures CVD,
-     liquidations. ✓ = confirmed, ✕ = not confirmed (drawn faded, or hidden if you choose). */
+   What is different (on purpose):
+   • FIXED TIMEFRAME. Everything (colour, signals, weighted line, bands) is calculated on the indicator's own candles
+     (setting: 1 hour, 4 hours, 1 day, 1430 minutes, 1 week, 1 month) and only then drawn on the chart. Changing the
+     chart timeframe changes how it is drawn, never the values or the signals.
+   • NO REPAINT. Only closed candles of that timeframe are used; a signal appears on the first chart candle after the
+     indicator candle closed and never moves or disappears.
+     1430 minutes is built like TradingView builds it on a 24 h crypto session: each UTC day has a 00:00–23:50 candle
+     and a short 23:50–24:00 candle. The 00:00–23:50 candle is compared with the previous day's 00:00 close.
+   • FINAL SIGNAL. A colour flip is only a candidate. It becomes a FINAL BUY / SELL when FlowDesk's own tools agree:
+     – at the time it fired (from candles, never changes): taker delta, volume, close location, EMA 21/50 trend,
+       Session-2 weighted line, RSI, market type (Trade-plan regime), HTF S/R weekly bias, size of the move;
+     – for a fresh signal, live tools (saved when first seen, never change): Direction bar, Decision panel, Trade plan,
+       Key points trend, whales, futures CVD, order book, liquidations, liquidation fuel, funding.
+     The score needed is a setting. The status box also shows a backtest: how often raw flips vs FINAL signals were
+     right on this coin and timeframe. */
 (function () {
 'use strict';
 const OF = window.OF, LS = OF.LS, el = OF.el;
@@ -29,11 +31,11 @@ const Z = OF.s12 = {};
 const TFOPT = [['60', '1 hour'], ['240', '4 hours'], ['D', '1 day'], ['1430', '1430 minutes'], ['W', '1 week'], ['M', '1 month']];
 const TFNAME = { '60': '1h', '240': '4h', 'D': '1D', '1430': '1430m', 'W': '1W', 'M': '1M' };
 const DEF = {
-  on: true, tf: '1430', timing: 'htf',
+  on: true, tf: '1430',
   s1: true, bg: true, bar: true, sig: true, diffPane: false,
   s2: true, threshold: 0.004, bandOffset: 0.0015, smooth: 10, fill: true,
   up: '#008000', dn: '#FF0000',                       // Pine v2 `green` / `red`
-  confirm: true, hideWeak: false, minHist: 3, box: true, alerts: true
+  confirm: true, hideWeak: false, minScore: 60, minLive: 55, hold: 10, box: true, alerts: true
 };
 Z.cfg = () => Object.assign({}, DEF, LS.get('s12', {}));
 Z.save = c => { LS.set('s12', c); Z._c = null; };
@@ -90,7 +92,7 @@ function need2350(S, days) {
   return map;
 }
 
-function htfBars(S, tf, chartK) {
+function htfBars(S, tf) {
   const now = OF.now();
   const conv = (k, ms) => k.map(c => ({ s: c.t, e: ms === 'M' ? monthEnd(c.t) : c.t + ms, o: c.o, h: c.h, l: c.l, c: c.c, qv: c.qv, bqv: c.bqv }));
   if (tf === '60' || tf === '240' || tf === 'D') {
@@ -102,7 +104,7 @@ function htfBars(S, tf, chartK) {
   if (tf === 'M') { const k = loadMonthly(S); return k ? conv(k, 'M') : null; }
   // 1430 minutes: [day, day+23:50) and [day+23:50, day+24h) per UTC day
   const d1 = S.k['1d']; if (!d1) { OF.loadKlines('1d'); return null; }
-  const from = Math.max(chartK && chartK.length ? Math.floor(chartK[0].t / DAY) * DAY - 15 * DAY : 0, Math.floor(OF.now() / DAY) * DAY - 118 * DAY);   // last ~4 months
+  const from = Math.floor(OF.now() / DAY) * DAY - 118 * DAY;   // last ~4 months (fixed: does not depend on the chart)
   const days = d1.filter(c => c.t >= from).map(c => c.t);
   const map = need2350(S, days), out = [];
   for (const c of d1) {
@@ -124,240 +126,277 @@ function lastClosed(H, t, strict) {
   return r;
 }
 
-/* ---------- order-flow checks ---------- */
-function histChecks(dir, ev, prevAvg, cvd) {
-  const out = [];
-  const dl = ev.qv ? (2 * ev.bqv - ev.qv) / ev.qv : 0;
-  out.push({ n: 'Taker delta', ok: dl * dir > 0.02, t: (dir > 0 ? 'buyers ' : 'sellers ') + Math.round((0.5 + dir * dl / 2) * 100) + '% of volume' });
-  const vr = prevAvg ? ev.qv / prevAvg : 1;
-  out.push({ n: 'Volume', ok: vr >= 0.8, t: vr.toFixed(2) + '× normal' });
-  const loc = ev.h > ev.l ? (ev.c - ev.l) / (ev.h - ev.l) : 0.5, ld = dir > 0 ? loc : 1 - loc;
-  out.push({ n: 'Close location', ok: ld >= 0.5, t: 'closed ' + Math.round(loc * 100) + '% up the range' });
-  out.push({ n: 'Chart CVD (5 bars)', ok: cvd * dir > 0, t: OF.fmtUsd(cvd, true) });
-  return out;
-}
-function liveChecks(dir) {
-  const S = OF.S, out = [], m = OF.meters(), mt = OF.mtf();
-  const get = k => m && m.list.find(x => x.key === k);
-  if (mt && mt.overall != null) out.push({ n: 'Direction bar', ok: mt.overall * dir > 10, t: (mt.overall > 0 ? '+' : '') + mt.overall });
-  const imb = get('imb'); if (imb && imb.score != null) out.push({ n: 'Order book', ok: imb.score * dir > 0, t: imb.text });
-  const wh = get('whale'); if (wh && wh.score != null) out.push({ n: 'Whales (1 h)', ok: wh.score * dir > 0, t: wh.text });
-  const fc = get('fcvd15'); if (fc && fc.score != null) out.push({ n: 'Futures CVD', ok: fc.score * dir > 0, t: fc.text });
-  const lq = get('liq'); if (lq && lq.score != null && lq.score !== 0) out.push({ n: 'Liquidations', ok: lq.score * dir > 0, t: lq.text });
-  const cv = get('cvd5'); if (cv && cv.score != null) out.push({ n: 'Spot CVD (5 min)', ok: cv.score * dir > 0, t: cv.text });
-  return S && S.status === 'LIVE' || OF.demo ? out : [];
+/* ---------- the indicator on its own candles ---------- */
+const sma = (a, i, n, f) => { if (i < n - 1) return null; let s = 0; for (let j = i - n + 1; j <= i; j++) { const v = f(a[j]); if (v == null) return null; s += v; } return s / n; };
+
+/* HTF S/R (weekly) bias at a given time, walked like the HTF S/R module does */
+function htfBiasAt(sig, t) {
+  let b = 0;
+  for (let j = 0; j < sig.length && sig[j].at <= t; j++) {
+    const both = (sig[j + 1] && sig[j + 1].at === sig[j].at) || (sig[j - 1] && sig[j - 1].at === sig[j].at);
+    if (!both) b = sig[j].h ? -1 : 1;
+  }
+  return b;
 }
 
-/* ---------- the indicator on the chart's own candles ---------- */
-Z.calc = function (k, ms) {
-  const S = OF.S; if (!S || !S.info || !k || !k.length) return null;
-  const c = Z.cfg(), now = OF.now(), lastK = k[k.length - 1];
-  const key = [S.symbol, ms, k.length, k[0].t, lastK.t, c.timing === 'chart' ? lastK.c : 0, JSON.stringify(c)].join('|');
-  if (Z._c && Z._c.key === key && Date.now() - Z._c.at < 3000) return Z._c;
-  const H = htfBars(S, c.tf, k); if (!H || H.length < 3) return { wait: true, c };
-  const n = k.length, d = new Array(n).fill(null), today = new Array(n).fill(null), src = new Array(n).fill(-1);
-  for (let i = 0; i < n; i++) {
-    const Tc = Math.min(k[i].t + ms, now);
-    if (c.timing === 'chart') {
-      const j = lastClosed(H, Tc, true); if (j < 0) continue;
-      const y = H[j].c; today[i] = k[i].c; d[i] = (k[i].c - y) / y; src[i] = j + 1;     // forming HTF candle j+1
-    } else {
-      let j = lastClosed(H, Tc, false);
-      if (j >= 0 && H[j].part === 'B') j--;            // 1430: compare the 00:00–23:50 candle with the close before it
-      if (j < 1) continue;
-      const y = H[j - 1].c; today[i] = H[j].c; d[i] = (H[j].c - y) / y; src[i] = j;
-    }
+/* candle-based checks, known when the indicator candle closed (weights in brackets) */
+function histChecks(P, j, dir, c, ctx) {
+  const x = P[j], out = [], add = (n, w, ok, t) => out.push({ n, w, ok, t });
+  const dl = x.qv ? (2 * x.bqv - x.qv) / x.qv : 0;
+  add('Taker delta', 1, dl * dir > 0.02, (dir > 0 ? 'buyers ' : 'sellers ') + Math.round((0.5 + dir * dl / 2) * 100) + '% of volume');
+  let a = 0, b = 0; for (let q = Math.max(0, j - 20); q < j; q++) { a += P[q].qv; b++; }
+  const vr = b && a ? x.qv / (a / b) : 1;
+  add('Volume', 0.5, vr >= 0.8, vr.toFixed(2) + '× normal');
+  const loc = x.h > x.l ? (x.c - x.l) / (x.h - x.l) : 0.5;
+  add('Close location', 0.75, (dir > 0 ? loc : 1 - loc) >= 0.5, 'closed ' + Math.round(loc * 100) + '% up the candle');
+  const e21 = ctx.e21[j], e50 = ctx.e50[j];
+  if (e21 != null && e50 != null) add('Trend EMA 21/50', 1, (dir > 0 ? x.c > e21 || e21 > e50 : x.c < e21 || e21 < e50), 'close ' + (x.c > e21 ? 'above' : 'below') + ' EMA21, EMA21 ' + (e21 > e50 ? 'above' : 'below') + ' EMA50');
+  if (ctx.sm[j] != null) add('Session 2 line', 1, dir > 0 ? x.c > ctx.sm[j] : x.c < ctx.sm[j], 'close ' + (x.c > ctx.sm[j] ? 'above' : 'below') + ' weighted line ' + OF.fp(ctx.sm[j]));
+  const r = ctx.rsi[j]; if (r != null) add('RSI not stretched', 0.5, dir > 0 ? r < 70 : r > 30, 'RSI ' + r.toFixed(0));
+  if (j >= 56 && OF.edge && OF.edge.regime) { const g = OF.edge.regime(P, j); add('Market type', 0.5, g.type !== 'chaos' && !(g.type === 'trend' && g.dir === -dir), g.type + (g.type === 'trend' ? (g.dir > 0 ? ' up' : ' down') : '')); }
+  if (ctx.hsig) { const hb = htfBiasAt(ctx.hsig, x.e); if (hb) add('HTF S/R weekly bias', 1, hb === dir, hb > 0 ? 'SUPPORT mode' : 'RESISTANCE mode'); }
+  add('Size of move', 0.75, Math.abs(ctx.d[j]) > c.threshold, (ctx.d[j] * 100).toFixed(2) + '% vs ' + (c.threshold * 100).toFixed(1) + '% threshold');
+  return out;
+}
+/* live FlowDesk tools — only for a signal that is happening now */
+function liveChecks(dir) {
+  // each tool: agrees (✓ 1), neutral (– ½) or against (✕ 0) the signal direction
+  const S = OF.S, out = [], add = (n, w, x, th, t) => { const v = x * dir > th ? 1 : x * dir < -th ? 0 : 0.5; out.push({ n, w, v, ok: v === 1, t }); };
+  if (!(OF.demo || (S && S.status === 'LIVE'))) return out;
+  const m = OF.meters(), get = k => m && m.list.find(x => x.key === k && x.score != null);
+  const mt = OF.mtf(); if (mt && mt.overall != null) add('Direction bar', 1.2, mt.overall, 10, 'overall ' + (mt.overall > 0 ? '+' : '') + mt.overall);
+  const dc = OF.lastDecision || OF.decision(); if (dc) add('Decision panel', 1, dc.score, 8, dc.verdict + ' · score ' + Math.round(dc.score));
+  try { const tp = OF.tradePlan(); if (tp && tp.bias != null) add('Trade plan analysis', 1, tp.bias, 0.08, 'bias ' + (tp.bias > 0 ? '+' : '') + Math.round(tp.bias * 100) + ' · ' + (tp.verdict || '')); } catch (e) {}
+  try { const kr = OF.keyRead('1h'); if (kr && kr.trend) add('Key points trend', 0.8, kr.trend === 'UP' ? 1 : kr.trend === 'DOWN' ? -1 : 0, 0.5, kr.trend + ' · ' + kr.pside); } catch (e) {}
+  const wh = get('whale'); if (wh) add('Whales (1 h)', 0.6, wh.score, 10, wh.text);
+  const fc = get('fcvd15'); if (fc) add('Futures CVD (15 min)', 0.6, fc.score, 10, fc.text);
+  const im = get('imb'); if (im) add('Order book', 0.5, im.score, 10, im.text);
+  const lq = get('liq'); if (lq) add('Liquidations (1 h)', 0.4, lq.score, 10, lq.text);
+  const fu = get('fuel'); if (fu) add('Liquidation fuel', 0.4, fu.score, 10, fu.text);
+  const fd = get('fund'); if (fd) add('Funding (crowd)', 0.4, fd.score, 30, fd.text);
+  return out;
+}
+const pct = L => { let w = 0, p = 0; for (const x of L) { w += x.w; p += x.w * (x.v != null ? x.v : x.ok ? 1 : 0); } return w ? Math.round(p / w * 100) : 0; };
+const mark = x => x.v === 0.5 ? '– ' : x.ok ? '✓ ' : '✕ ';
+
+Z.calc = function () {
+  const S = OF.S; if (!S || !S.info) return null;
+  const c = Z.cfg(), now = OF.now();
+  const H = htfBars(S, c.tf); if (!H || H.length < 3) return { wait: true, c };
+  const lastH = H[H.length - 1], key = [S.symbol, H.length, lastH.e, JSON.stringify(c), Math.floor(now / 6e4)].join('|');
+  if (Z._c && Z._c.key === key) return Z._c;
+  // points: closed indicator candles with the close they are compared against
+  const P = [];
+  for (let i = 1; i < H.length; i++) {
+    const x = H[i]; if (x.e > now) break;
+    if (c.tf === '1430' && x.part !== 'A') continue;
+    P.push(Object.assign({}, x, { prev: H[i - 1].c }));
   }
-  // Session 2 lines
-  const zero = today.map((t, i) => t == null ? null : t - d[i] * t), sm = new Array(n).fill(null), sig = new Array(n).fill(false);
-  for (let i = 0; i < n; i++) {
-    if (i < c.smooth - 1) continue; let s = 0, ok = true;
-    for (let j = i - c.smooth + 1; j <= i; j++) { if (zero[j] == null) { ok = false; break; } s += zero[j]; }
-    if (!ok) continue; sm[i] = s / c.smooth;
-    sig[i] = Math.abs(d[i]) > (k[i].h - k[i].l) * 0.02 || Math.abs(d[i]) > c.threshold;
-  }
-  // Session 1 signals + confirmation
-  const sigs = [], frozen = LS.get('s12live', {});
-  let dirty = false;
-  for (let i = 1; i < n; i++) {
-    if (d[i] == null || d[i - 1] == null) continue;
-    const dir = d[i] > 0 && d[i - 1] <= 0 ? 1 : d[i] < 0 && d[i - 1] >= 0 ? -1 : 0;
-    if (!dir) continue;
-    const forming = c.timing === 'chart' && i === n - 1 && k[i].t + ms > now;
-    let ev, prevAvg = 0;
-    if (c.timing === 'chart') {                       // evidence: chart candles of the forming HTF candle so far
-      const hs = H[src[i]] ? H[src[i]].s : (H[H.length - 1].e);
-      let o = null, h = -Infinity, l = Infinity, qv = 0, bqv = 0, m = 0, a = 0, b = 0;
-      for (let j = i; j >= 0 && k[j].t >= hs; j--) { o = k[j].o; h = Math.max(h, k[j].h); l = Math.min(l, k[j].l); qv += k[j].qv; bqv += k[j].bqv; m++; }
-      if (!m) { o = k[i].o; h = k[i].h; l = k[i].l; qv = k[i].qv; bqv = k[i].bqv; m = 1; }
-      for (let j = Math.max(0, i - m - 20); j < i - m + 1 && j >= 0; j++) { a += k[j].qv; b++; }
-      ev = { o, h, l, c: k[i].c, qv: qv / m, bqv: bqv / m }; prevAvg = b ? a / b : 0;
-    } else {
-      const j = src[i], hb = H[j]; ev = hb; let a = 0, b = 0;
-      for (let q = Math.max(0, j - 20); q < j; q++) if (H[q].part === hb.part || !hb.part) { a += H[q].qv; b++; }
-      prevAvg = b ? a / b : 0;
-      if (hb.part === 'B') prevAvg = ev.qv;            // the 10-minute candle uses its day's volume
-    }
-    let cvd = 0; for (let j = Math.max(0, i - 4); j <= i; j++) cvd += 2 * k[j].bqv - k[j].qv;
-    const hc = histChecks(dir, ev, prevAvg, cvd), hp = hc.filter(x => x.ok).length;
-    // live order flow: only for a signal that is happening now; frozen when first seen so it never repaints
-    const fk = S.symbol + '|' + c.tf + '|' + c.timing + '|' + k[i].t + '|' + dir;
+  if (P.length < 3) return { wait: true, c };
+  const n = P.length, d = P.map(x => (x.c - x.prev) / x.prev);
+  const zero = P.map((x, i) => x.c - d[i] * x.c), sm = zero.map((_, i) => sma(zero, i, c.smooth, v => v));
+  const sig = P.map((x, i) => sm[i] != null && (Math.abs(d[i]) > (x.h - x.l) * 0.02 || Math.abs(d[i]) > c.threshold));
+  let hsig = null; try { const hr = OF.htfsr.calc(); if (hr && hr.levels && hr.levels[3]) hsig = hr.sig; } catch (e) {}
+  const ctx = { d, sm, e21: OF.ema(P, 21), e50: OF.ema(P, 50), rsi: OF.rsi(P, 14), hsig };
+  const frozen = LS.get('s12live', {}); let dirty = false;
+  const sigs = [], period = n > 1 ? P[n - 1].e - P[n - 2].e : DAY;
+  for (let j = 1; j < n; j++) {
+    const dir = d[j] > 0 && d[j - 1] <= 0 ? 1 : d[j] < 0 && d[j - 1] >= 0 ? -1 : 0; if (!dir) continue;
+    const hc = histChecks(P, j, dir, c, ctx), hs = pct(hc);
+    const fk = S.symbol + '|' + c.tf + '|' + P[j].e + '|' + dir;
     let lc = frozen[fk] || null;
-    const fresh = now - k[i].t < Math.max(ms * 2, 36e5);
-    if (!lc && fresh && !forming) { const L = liveChecks(dir); if (L.length) { lc = L; frozen[fk] = L; dirty = true; } }
-    const lp = lc ? lc.filter(x => x.ok).length : 0;
-    const ok = hp >= c.minHist && (!lc || lp >= Math.ceil(lc.length / 2));
-    sigs.push({ i, t: k[i].t, dir, hc, hp, lc, lp, ok, forming, d: d[i] });
+    if (!lc && now - P[j].e < Math.max(period * 1.5, 3 * 36e5)) { const L = liveChecks(dir); if (L.length >= 4) { lc = L; frozen[fk] = L; dirty = true; } }
+    const ls = lc ? pct(lc) : null;
+    const ok = hs >= c.minScore && (ls == null || ls >= c.minLive);
+    sigs.push({ j, e: P[j].e, dir, hc, hs, lc, ls, ok, d: d[j], px: P[j].c });
   }
   if (dirty) { const ks = Object.keys(frozen); if (ks.length > 300) ks.slice(0, ks.length - 300).forEach(x => delete frozen[x]); LS.set('s12live', frozen); }
-  const r = { key, at: Date.now(), c, d, sm, sig, sigs, H, n };
-  Z._c = r; Z.alerts(r, k, ms);
+  // backtest: hold until the opposite flip or `hold` candles, whichever first
+  const bt = (list) => {
+    let nn = 0, w = 0, sum = 0;
+    for (const s of list) {
+      const nx = sigs.find(q => q.j > s.j && q.dir === -s.dir), x = Math.min(nx ? nx.j : n - 1, s.j + c.hold);
+      if (x <= s.j) continue;
+      const r = s.dir * (P[x].c / P[s.j].c - 1); nn++; sum += r; if (r > 0) w++;
+    }
+    return { n: nn, win: nn ? w / nn : 0, avg: nn ? sum / nn : 0 };
+  };
+  const btRaw = bt(sigs), btFin = bt(sigs.filter(s => s.ok));
+  // now: the current colour checked against live FlowDesk tools
+  const dirNow = d[n - 1] > 0 ? 1 : -1, nowL = liveChecks(dirNow), nowS = nowL.length ? pct(nowL) : null;
+  const r = { key, at: Date.now(), c, P, d, sm, sig, sigs, btRaw, btFin, dirNow, nowL, nowS };
+  Z._c = r; Z.alerts(r);
   return r;
 };
 
-/* alertcondition(): BUY / SELL and Session-2 entry-line touches, once per closed chart candle */
-Z.alerts = function (r, k, ms) {
-  const c = r.c; if (!c.alerts || !k.length) return;
-  const now = OF.now(); let i = k.length - 1; if (k[i].t + ms > now) i--;   // last CLOSED chart candle
-  if (i < 1) return;
-  const sk = 's12seen:' + OF.S.symbol + ':' + c.tf + ':' + ms, seen = LS.get(sk, 0);
-  if (!seen) { LS.set(sk, k[i].t); return; }
-  if (k[i].t <= seen) return;
-  LS.set(sk, k[i].t);
-  const s = r.sigs.find(x => x.i === i);
-  if (s && (!c.hideWeak || s.ok)) OF.notify(s.dir > 0 ? 'S1-Buy Alert' : 'S1-Sell Alert', (s.dir > 0 ? 'Background GREEN -> BUY' : 'Background RED -> SELL') + ' · ' + (s.ok ? '✓ confirmed by order flow' : '✕ not confirmed by order flow') + ` (${s.hp}/4 candle${s.lc ? `, ${s.lp}/${s.lc.length} live` : ''})`);
-  if (r.sig[i] && r.sm[i] != null && r.sm[i - 1] != null) {
-    const ub = x => r.sm[x] * (1 + c.bandOffset), lb = x => r.sm[x] * (1 - c.bandOffset);
-    const cross = (a, b) => (k[i].c - a) * (k[i - 1].c - b) <= 0 && k[i].c !== k[i - 1].c;
-    if (cross(ub(i), ub(i - 1))) OF.notify('S2-Price touched Upper Entry Line', 'Price touched Upper Entry Line – check for entry (' + OF.fp(ub(i)) + ')');
-    if (cross(lb(i), lb(i - 1))) OF.notify('S2-Price touched Lower Entry Line', 'Price touched Lower Entry Line – check for entry (' + OF.fp(lb(i)) + ')');
-  }
+/* alertcondition(): one pop-up per new indicator candle with a flip, saying FINAL or not */
+Z.alerts = function (r) {
+  const c = r.c; if (!c.alerts) return;
+  const sk = 's12seen:' + OF.S.symbol + ':' + c.tf, seen = LS.get(sk, 0), last = r.P[r.P.length - 1].e;
+  if (!seen) { LS.set(sk, last); return; }
+  if (last <= seen) return;
+  LS.set(sk, last);
+  const s = r.sigs.find(x => x.e > seen && x.e === last); if (!s) return;
+  if (c.hideWeak && !s.ok) return;
+  OF.notify((s.ok ? 'FINAL ' : '') + (s.dir > 0 ? 'S1-Buy Alert' : 'S1-Sell Alert'),
+    (s.dir > 0 ? 'Background GREEN -> BUY' : 'Background RED -> SELL') + ' · ' + (s.ok ? '✓ FINAL — FlowDesk data agrees' : '✕ not confirmed by FlowDesk data') + ` (candles ${s.hs}%${s.ls != null ? ', live tools ' + s.ls + '%' : ''})`);
 };
+
+/* project the indicator values onto the chart's candles (state = last indicator candle closed by that chart candle) */
+function project(r, k, ms) {
+  const n = k.length, now = OF.now(), idx = new Array(n).fill(-1), at = new Map();
+  let p = 0;
+  for (let i = 0; i < n; i++) {
+    const Tc = Math.min(k[i].t + ms, now);
+    while (p < r.P.length && r.P[p].e <= Tc) p++;
+    idx[i] = p - 1;
+  }
+  const bySig = new Map(r.sigs.map(s => [s.j, s]));
+  for (let i = 0; i < n; i++) {
+    const from = i ? idx[i - 1] + 1 : Math.max(0, idx[0]), to = idx[i];
+    for (let j = from; j <= to && j >= 0; j++) if (bySig.has(j)) at.set(i, bySig.get(j));   // keep the latest flip inside this chart candle
+  }
+  return { idx, at };
+}
 
 /* background (Session 1) — drawn before the candles */
 Z.drawBg = function (ctx, g) {
   const c = Z.cfg(); if (!c.on || !c.s1 || !c.bg) return;
-  const r = Z.calc(g.k, g.ms); if (!r || r.wait) return;
+  const r = Z.calc(); if (!r || r.wait) return;
+  const pr = g._pr = project(r, g.k, g.ms);
   for (let i = g.i0; i < g.end; i++) {
-    if (r.d[i] == null) continue;
-    ctx.fillStyle = alpha(r.d[i] > 0 ? c.up : c.dn, 0.15);
+    const j = pr.idx[i]; if (j < 0) continue;
+    ctx.fillStyle = alpha(r.d[j] > 0 ? c.up : c.dn, 0.15);
     ctx.fillRect(Math.floor(g.X(i) - g.bw / 2), g.top, Math.ceil(g.bw) + 1, g.bottom - g.top);
   }
 };
+
 /* barcolor + Session 2 lines + signals + status — drawn after the candles */
 Z.draw = function (ctx, g) {
   const c = Z.cfg(); if (!c.on) return;
-  const r = Z.calc(g.k, g.ms), k = g.k;
+  const r = Z.calc(), k = g.k;
   ctx.save();
   if (!r || r.wait) {
     ctx.font = '600 11px Inter,system-ui,sans-serif'; ctx.fillStyle = '#c4b5fd'; ctx.textAlign = 'right'; ctx.textBaseline = 'top';
     ctx.fillText('S1+S2 · loading ' + TFOPT.find(x => x[0] === c.tf)[1] + ' candles…', g.pw - 10, g.top + 40); ctx.restore(); return;
   }
-  // barcolor: body, border and wick in the state colour
+  const pr = g._pr || (g._pr = project(r, k, g.ms)), J = pr.idx; Z._pr = pr;
   if (c.s1 && c.bar) for (let i = g.i0; i < g.end; i++) {
-    if (r.d[i] == null) continue;
-    const b = k[i], x = g.X(i), col = r.d[i] > 0 ? c.up : c.dn, w = g.bw * 0.7;
+    const j = J[i]; if (j < 0) continue;
+    const b = k[i], x = g.X(i), col = r.d[j] > 0 ? c.up : c.dn, w = g.bw * 0.7;
     ctx.strokeStyle = ctx.fillStyle = col;
     ctx.beginPath(); ctx.moveTo(Math.round(x) + .5, g.Y(b.h)); ctx.lineTo(Math.round(x) + .5, g.Y(b.l)); ctx.stroke();
     const y1 = g.Y(Math.max(b.o, b.c)), y2 = g.Y(Math.min(b.o, b.c));
     ctx.fillRect(Math.round(x - w / 2), y1, Math.max(1, Math.round(w)), Math.max(1, y2 - y1));
   }
-  // Session 2: weighted line, dashed entry lines, shaded zone — only where the move is significant
+  // Session 2: weighted line, dashed entry lines and zone (values change only when an indicator candle closes)
   if (c.s2) {
-    const on = i => r.sig[i] && r.sm[i] != null;
+    const on = i => J[i] >= 0 && r.sig[J[i]];
+    const val = (i, m) => r.sm[J[i]] * m;
     if (c.fill) for (let i = Math.max(g.i0, 1); i < g.end; i++) {
       if (!on(i) || !on(i - 1)) continue;
-      const a = i - 1, col = r.d[i] > 0 ? c.up : c.dn;
-      ctx.fillStyle = alpha(col, 0.12); ctx.beginPath();
-      ctx.moveTo(g.X(a), g.Y(r.sm[a] * (1 + c.bandOffset))); ctx.lineTo(g.X(i), g.Y(r.sm[i] * (1 + c.bandOffset)));
-      ctx.lineTo(g.X(i), g.Y(r.sm[i] * (1 - c.bandOffset))); ctx.lineTo(g.X(a), g.Y(r.sm[a] * (1 - c.bandOffset))); ctx.closePath(); ctx.fill();
+      ctx.fillStyle = alpha(r.d[J[i]] > 0 ? c.up : c.dn, 0.12); ctx.beginPath();
+      ctx.moveTo(g.X(i - 1), g.Y(val(i - 1, 1 + c.bandOffset))); ctx.lineTo(g.X(i), g.Y(val(i, 1 + c.bandOffset)));
+      ctx.lineTo(g.X(i), g.Y(val(i, 1 - c.bandOffset))); ctx.lineTo(g.X(i - 1), g.Y(val(i - 1, 1 - c.bandOffset))); ctx.closePath(); ctx.fill();
     }
-    const seg = (mult, width, dash, a) => {
+    const seg = (m, width, dash, a) => {
       ctx.lineWidth = width; ctx.setLineDash(dash);
       for (let i = Math.max(g.i0, 1); i < g.end; i++) {
         if (!on(i) || !on(i - 1)) continue;
-        ctx.strokeStyle = alpha(r.d[i] > 0 ? c.up : c.dn, a);
-        ctx.beginPath(); ctx.moveTo(g.X(i - 1), g.Y(r.sm[i - 1] * mult)); ctx.lineTo(g.X(i), g.Y(r.sm[i] * mult)); ctx.stroke();
-      }
-      // a single significant bar still shows as a short tick (Pine draws a point)
-      for (let i = g.i0; i < g.end; i++) if (on(i) && !(i > 0 && on(i - 1)) && !(i + 1 < g.end && on(i + 1))) {
-        ctx.strokeStyle = alpha(r.d[i] > 0 ? c.up : c.dn, a); ctx.beginPath(); ctx.moveTo(g.X(i) - g.bw * 0.4, g.Y(r.sm[i] * mult)); ctx.lineTo(g.X(i) + g.bw * 0.4, g.Y(r.sm[i] * mult)); ctx.stroke();
+        ctx.strokeStyle = alpha(r.d[J[i]] > 0 ? c.up : c.dn, a);
+        ctx.beginPath(); ctx.moveTo(g.X(i - 1), g.Y(val(i - 1, m))); ctx.lineTo(g.X(i), g.Y(val(i, m))); ctx.stroke();
       }
       ctx.setLineDash([]); ctx.lineWidth = 1;
     };
     seg(1 + c.bandOffset, 1, [5, 4], 0.7); seg(1 - c.bandOffset, 1, [5, 4], 0.7); seg(1, 2, [], 1);
   }
-  // Session 1 signals: BUY label below the bar, SELL label above, ✓ / ✕ order-flow confirmation
+  // signals: FINAL = full label + ✓ ; raw flip that FlowDesk did not confirm = faded label + ✕
   if (c.s1 && c.sig) {
-    ctx.font = '700 10px Inter,system-ui,sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    for (const s of r.sigs) {
-      if (s.i < g.i0 || s.i >= g.end) continue;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    for (const [i, s] of pr.at) {
+      if (i < g.i0 || i >= g.end) continue;
       if (c.confirm && c.hideWeak && !s.ok) continue;
-      const b = k[s.i], x = g.X(s.i), col = s.dir > 0 ? c.up : c.dn, txt = s.dir > 0 ? 'BUY' : 'SELL';
-      const w = ctx.measureText(txt).width + 12, h = 16;
-      const y = s.dir > 0 ? g.Y(b.l) + 6 : g.Y(b.h) - 6 - h - 5;
-      ctx.globalAlpha = c.confirm && !s.ok ? 0.45 : 1;
+      const fin = !c.confirm || s.ok, b = k[i], x = g.X(i), col = s.dir > 0 ? c.up : c.dn;
+      const txt = (s.dir > 0 ? 'BUY' : 'SELL') + (c.confirm && fin ? ' ✓' : '');
+      ctx.font = `700 ${fin ? 10.5 : 9.5}px Inter,system-ui,sans-serif`;
+      const w = ctx.measureText(txt).width + 12, h = fin ? 17 : 15, y = s.dir > 0 ? g.Y(b.l) + 6 : g.Y(b.h) - 6 - h - 5;
+      ctx.globalAlpha = fin ? 1 : 0.4;
       ctx.fillStyle = col; ctx.beginPath();
       if (s.dir > 0) { ctx.moveTo(x, y); ctx.lineTo(x - 5, y + 5); ctx.lineTo(x + 5, y + 5); ctx.closePath(); ctx.fill(); ctx.beginPath(); ctx.roundRect(x - w / 2, y + 5, w, h, 3); }
       else { ctx.moveTo(x, y + h + 5); ctx.lineTo(x - 5, y + h); ctx.lineTo(x + 5, y + h); ctx.closePath(); ctx.fill(); ctx.beginPath(); ctx.roundRect(x - w / 2, y, w, h, 3); }
-      ctx.fill(); ctx.fillStyle = '#fff'; ctx.fillText(txt, x, (s.dir > 0 ? y + 5 : y) + h / 2 + .5);
-      if (c.confirm) {
-        const by = s.dir > 0 ? y + 5 + h + 8 : y - 8;
-        ctx.beginPath(); ctx.arc(x, by, 6.5, 0, 7); ctx.fillStyle = s.forming ? '#64748b' : s.ok ? '#16a34a' : '#475569'; ctx.fill();
-        ctx.fillStyle = '#fff'; ctx.font = '700 9px Inter,system-ui,sans-serif'; ctx.fillText(s.forming ? '…' : s.ok ? '✓' : '✕', x, by + .5);
-        ctx.font = '700 10px Inter,system-ui,sans-serif';
-      }
+      ctx.fill();
+      if (fin && c.confirm) { ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.2; ctx.stroke(); ctx.lineWidth = 1; }
+      ctx.fillStyle = '#fff'; ctx.fillText(txt, x, (s.dir > 0 ? y + 5 : y) + h / 2 + .5);
+      if (c.confirm && !fin) { ctx.font = '700 9px Inter,system-ui,sans-serif'; ctx.fillStyle = '#cbd5e1'; ctx.fillText('✕', x, s.dir > 0 ? y + 5 + h + 8 : y - 8); }
       ctx.globalAlpha = 1;
     }
   }
-  // S1-Daily Close Diff debug pane (bottom of the price pane)
+  // S1-Daily Close Diff pane
   if (c.s1 && c.diffPane) {
     const ph = 46, top = g.bottom - ph, mid = top + ph / 2; let mx = 0;
-    for (let i = g.i0; i < g.end; i++) if (r.d[i] != null) mx = Math.max(mx, Math.abs(r.d[i]));
+    for (let i = g.i0; i < g.end; i++) if (J[i] >= 0) mx = Math.max(mx, Math.abs(r.d[J[i]]));
     ctx.fillStyle = 'rgba(10,6,22,.75)'; ctx.fillRect(0, top, g.pw, ph);
     ctx.strokeStyle = 'rgba(255,255,255,.15)'; ctx.beginPath(); ctx.moveTo(0, mid); ctx.lineTo(g.pw, mid); ctx.stroke();
     ctx.lineWidth = 2;
     for (let i = Math.max(g.i0, 1); i < g.end; i++) {
-      if (r.d[i] == null || r.d[i - 1] == null || !mx) continue;
-      ctx.strokeStyle = r.d[i] > 0 ? c.up : c.dn; ctx.beginPath();
-      ctx.moveTo(g.X(i - 1), mid - r.d[i - 1] / mx * (ph / 2 - 4)); ctx.lineTo(g.X(i), mid - r.d[i] / mx * (ph / 2 - 4)); ctx.stroke();
+      if (J[i] < 0 || J[i - 1] < 0 || !mx) continue;
+      ctx.strokeStyle = r.d[J[i]] > 0 ? c.up : c.dn; ctx.beginPath();
+      ctx.moveTo(g.X(i - 1), mid - r.d[J[i - 1]] / mx * (ph / 2 - 4)); ctx.lineTo(g.X(i), mid - r.d[J[i]] / mx * (ph / 2 - 4)); ctx.stroke();
     }
     ctx.lineWidth = 1; ctx.fillStyle = '#cbd5e1'; ctx.font = '10px ui-monospace,monospace'; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
-    ctx.fillText('S1-Daily Close Diff ' + (r.d[g.end - 1] != null ? (r.d[g.end - 1] * 100).toFixed(3) + '%' : ''), 6, top + 3);
+    const lj = J[g.end - 1]; ctx.fillText('S1-Daily Close Diff ' + (lj >= 0 ? (r.d[lj] * 100).toFixed(3) + '%' : ''), 6, top + 3);
   }
-  // status box under the HTF S/R box
-  if (c.box) {
-    const L = g.end - 1, dv = r.d[L], last = r.sigs[r.sigs.length - 1];
-    const l1 = `S1+S2 · ${TFNAME[c.tf]} · ${dv == null ? '—' : (dv > 0 ? 'GREEN ' : 'RED ') + (dv >= 0 ? '+' : '') + (dv * 100).toFixed(2) + '%'}${c.timing === 'htf' ? ' · on HTF close' : ' · on chart close'}`;
-    const l2 = last ? `last ${last.dir > 0 ? 'BUY' : 'SELL'} ${ago(OF.now() - last.t)} ago · ${last.forming ? 'forming…' : last.ok ? '✓ confirmed' : '✕ not confirmed'} · candles ${last.hp}/4${last.lc ? ` · live flow ${last.lp}/${last.lc.length}` : ''}` : 'no signal on loaded candles';
-    ctx.font = '700 11px Inter,system-ui,sans-serif'; const w1 = ctx.measureText(l1).width; ctx.font = '500 10.5px Inter,system-ui,sans-serif'; const w2 = ctx.measureText(l2).width;
-    const w = Math.max(w1, w2) + 18, x = g.pw - w - 8, y = g.top + 36, col = dv == null ? '#64748b' : dv > 0 ? c.up : c.dn;
-    ctx.fillStyle = 'rgba(12,6,26,.9)'; ctx.strokeStyle = alpha(col, .9); ctx.lineWidth = 1.2; ctx.beginPath(); ctx.roundRect(x, y, w, 38, 7); ctx.fill(); ctx.stroke();
-    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-    ctx.fillStyle = '#fff'; ctx.font = '700 11px Inter,system-ui,sans-serif'; ctx.fillText(l1, x + 9, y + 12);
-    ctx.fillStyle = last && last.ok ? '#86efac' : '#cbd5e1'; ctx.font = '500 10.5px Inter,system-ui,sans-serif'; ctx.fillText(l2, x + 9, y + 27);
-    Z._box = { x, y, w, h: 38, last };
-  }
+  if (c.box) drawBox(ctx, g, r, c);
   ctx.restore();
 };
 const ago = ms => ms < 36e5 ? Math.max(1, Math.round(ms / 6e4)) + 'm' : ms < 2 * DAY ? Math.round(ms / 36e5) + 'h' : Math.round(ms / DAY) + 'd';
+function drawBox(ctx, g, r, c) {
+  const dv = r.d[r.d.length - 1], last = r.sigs[r.sigs.length - 1], lastF = r.sigs.filter(s => s.ok).pop(), now = OF.now();
+  const rows = [];
+  rows.push([`S1+S2 · ${TFNAME[c.tf]} (fixed) · ${dv > 0 ? 'GREEN' : 'RED'} ${dv >= 0 ? '+' : ''}${(dv * 100).toFixed(2)}%`, '#fff', 700]);
+  if (lastF) rows.push([`FINAL ${lastF.dir > 0 ? 'BUY' : 'SELL'} ✓ ${ago(now - lastF.e)} ago at ${OF.fp(lastF.px)} · candles ${lastF.hs}%${lastF.ls != null ? ' · live ' + lastF.ls + '%' : ''}`, lastF.dir > 0 ? '#86efac' : '#fca5a5', 600]);
+  else rows.push(['No FINAL signal on loaded history', '#cbd5e1', 500]);
+  if (last && last !== lastF) rows.push([`last flip ${last.dir > 0 ? 'BUY' : 'SELL'} ${ago(now - last.e)} ago ✕ not confirmed (candles ${last.hs}%${last.ls != null ? ', live ' + last.ls + '%' : ''})`, '#94a3b8', 500]);
+  if (r.nowS != null) {
+    const agree = r.nowS >= c.minLive, side = r.dirNow > 0 ? 'GREEN' : 'RED';
+    rows.push([`Now: FlowDesk tools ${r.nowS}% agree with ${side} → ${agree ? (r.dirNow > 0 ? 'BUY side holds' : 'SELL side holds') : 'WAIT / caution'}`, agree ? (r.dirNow > 0 ? '#86efac' : '#fca5a5') : '#fcd34d', 600]);
+  }
+  const b1 = r.btRaw, b2 = r.btFin;
+  if (b1.n) rows.push([`Backtest ${TFNAME[c.tf]}: all flips ${Math.round(b1.win * 100)}% right (${b1.n}) · FINAL ${b2.n ? Math.round(b2.win * 100) + '% right (' + b2.n + ')' : '—'}`, '#c4b5fd', 500]);
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  let w = 0; for (const [t, , fw] of rows) { ctx.font = `${fw} 10.5px Inter,system-ui,sans-serif`; w = Math.max(w, ctx.measureText(t).width); }
+  w += 18; const h = rows.length * 15 + 10, x = g.pw - w - 8, y = g.top + 36, col = dv > 0 ? c.up : c.dn;
+  ctx.fillStyle = 'rgba(12,6,26,.92)'; ctx.strokeStyle = alpha(col, .9); ctx.lineWidth = 1.2; ctx.beginPath(); ctx.roundRect(x, y, w, h, 7); ctx.fill(); ctx.stroke();
+  rows.forEach(([t, cl, fw], i) => { ctx.font = `${fw} 10.5px Inter,system-ui,sans-serif`; ctx.fillStyle = cl; ctx.fillText(t, x + 9, y + 12 + i * 15); });
+  Z._box = { x, y, w, h };
+}
 
-/* hover tooltip for a signal: which checks passed */
+/* hover tooltip for a signal: every check */
 Z.tip = function (ctx, g, mouse) {
-  const r = Z._c, c = Z.cfg(); if (!c.on || !c.confirm || !r || r.wait || !mouse) return;
-  const i = OF.clamp(Math.floor(mouse.x / g.bw) + g.i0, g.i0, g.end - 1), s = r.sigs.find(x => x.i === i); if (!s) return;
-  const rows = [[(s.dir > 0 ? 'BUY' : 'SELL') + ' · ' + (s.forming ? 'candle still forming' : s.ok ? '✓ confirmed by order flow' : '✕ not confirmed'), s.ok ? '#86efac' : '#fca5a5'],
-    ['Candles at signal time ' + s.hp + '/4 (need ' + c.minHist + ')', '#c4b5fd']].concat(s.hc.map(x => [(x.ok ? '✓ ' : '✕ ') + x.n + ' — ' + x.t, x.ok ? '#bbf7d0' : '#94a3b8']));
-  if (s.lc) { rows.push(['Live order flow when it fired ' + s.lp + '/' + s.lc.length, '#c4b5fd']); s.lc.forEach(x => rows.push([(x.ok ? '✓ ' : '✕ ') + x.n + ' — ' + x.t, x.ok ? '#bbf7d0' : '#94a3b8'])); }
-  else rows.push(['Live order flow: not recorded (older signal)', '#64748b']);
+  const r = Z._c, c = Z.cfg(); if (!c.on || !r || r.wait || !mouse || !g._pr) return;
+  const B = Z._box, inBox = c.box && B && mouse.x >= B.x && mouse.x <= B.x + B.w && mouse.y >= B.y && mouse.y <= B.y + B.h;
+  const i = OF.clamp(Math.floor(mouse.x / g.bw) + g.i0, g.i0, g.end - 1), s = inBox ? null : g._pr.at.get(i);
+  if (inBox) {
+    const rows = [[`Now: ${r.dirNow > 0 ? 'GREEN' : 'RED'} checked with live FlowDesk tools — ${r.nowS == null ? 'waiting for live data' : r.nowS + '% agree'}`, '#c4b5fd']].concat((r.nowL || []).map(x => [mark(x) + x.n + ' — ' + x.t, x.ok ? '#bbf7d0' : x.v === 0.5 ? '#cbd5e1' : '#94a3b8']));
+    return box(ctx, g, rows, B.x + B.w - 470, B.y + B.h + 6);
+  }
+  if (!s) return;
+  const rows = [[(s.dir > 0 ? 'BUY' : 'SELL') + ' · ' + (s.ok ? '✓ FINAL — FlowDesk data agrees' : '✕ only the indicator — FlowDesk data does not agree'), s.ok ? '#86efac' : '#fca5a5'],
+    [`When it fired (candles, ${TFNAME[c.tf]}): ${s.hs}% · need ${c.minScore}%`, '#c4b5fd']].concat(s.hc.map(x => [(x.ok ? '✓ ' : '✕ ') + x.n + ' — ' + x.t, x.ok ? '#bbf7d0' : '#94a3b8']));
+  if (s.lc) { rows.push([`Live FlowDesk tools when it fired: ${s.ls}% · need ${c.minLive}%`, '#c4b5fd']); s.lc.forEach(x => rows.push([mark(x) + x.n + ' — ' + x.t, x.ok ? '#bbf7d0' : x.v === 0.5 ? '#cbd5e1' : '#94a3b8'])); }
+  else rows.push(['Live tools: not recorded (signal is older than this page session)', '#64748b']);
+  box(ctx, g, rows, mouse.x + 14, mouse.y + 14, mouse);
+};
+function box(ctx, g, rows, x, y, mouse) {
   ctx.save(); ctx.font = '11px Inter,system-ui,sans-serif';
-  const w = Math.min(420, Math.max(...rows.map(x => ctx.measureText(x[0]).width)) + 18), h = rows.length * 15 + 10;
-  let x = mouse.x + 14, y = mouse.y + 14; if (x + w > g.pw) x = mouse.x - w - 14; if (y + h > g.bottom) y = Math.max(g.top, mouse.y - h - 14);
+  const T = t => t.length > 74 ? t.slice(0, 72) + '…' : t;
+  const w = Math.min(460, Math.max(...rows.map(x => ctx.measureText(T(x[0])).width)) + 18), h = rows.length * 15 + 10;
+  if (x + w > g.pw) x = mouse ? mouse.x - w - 14 : g.pw - w - 8; x = Math.max(4, x); if (y + h > g.bottom) y = Math.max(g.top, g.bottom - h);
   ctx.fillStyle = 'rgba(12,6,26,.96)'; ctx.strokeStyle = '#a855f7'; ctx.beginPath(); ctx.roundRect(x, y, w, h, 7); ctx.fill(); ctx.stroke();
   ctx.textAlign = 'left'; ctx.textBaseline = 'top';
-  rows.forEach(([t, col], j) => { ctx.fillStyle = col; ctx.fillText(t.length > 70 ? t.slice(0, 68) + '…' : t, x + 9, y + 6 + j * 15); });
+  rows.forEach(([t, col], j) => { ctx.fillStyle = col; ctx.fillText(T(t), x + 9, y + 6 + j * 15); });
   ctx.restore();
-};
+}
 
 /* settings popover */
 Z.panel = function (anchor) {
@@ -369,7 +408,7 @@ Z.panel = function (anchor) {
   const ck = (f, t) => `<label class="vrow"><input type="checkbox" data-g="${f}" ${c[f] ? 'checked' : ''}> ${t}</label>`;
   pop.innerHTML = `<div class="cph">S1+S2 · Session 1 &amp; Session 2 <button class="cpx">✕</button></div>
     <div class="htfline"><span>Timeframe</span><select data-g="tf" style="grid-column:span 3">${opt(TFOPT, c.tf)}</select></div>
-    <div class="htfline"><span>Signal on</span><select data-g="timing" style="grid-column:span 3">${opt([['htf', 'Higher-timeframe candle close (no repaint)'], ['chart', 'Chart candle close (faster)']], c.timing)}</select></div>
+    <div class="muted sm" style="margin:4px 0 2px">Fixed: the chart timeframe does not change the indicator. Signals appear when a ${TFOPT.find(x => x[0] === c.tf)[1]} candle closes (no repaint).</div>
     <div class="htfsec">Session 1 · Bg &amp; candle colour</div>
     ${ck('s1', 'Show Session 1')}${ck('bg', 'Background colour')}${ck('bar', 'Colour the candles')}${ck('sig', 'BUY / SELL labels')}${ck('diffPane', 'S1-Daily Close Diff pane')}
     <div class="htfsec">Session 2 · Weighted line</div>
@@ -377,16 +416,17 @@ Z.panel = function (anchor) {
     <div class="htfline"><span>Threshold</span><input type="number" step="0.001" min="0" data-g="threshold" value="${c.threshold}"><span>Band offset</span><input type="number" step="0.0001" min="0" data-g="bandOffset" value="${c.bandOffset}"></div>
     <div class="htfline"><span>Smooth (SMA)</span><input type="number" min="1" max="200" data-g="smooth" value="${c.smooth}"><span></span><span></span></div>
     <div class="htfline"><span>Up colour</span><input type="color" data-g="up" value="${c.up}"><span>Down colour</span><input type="color" data-g="dn" value="${c.dn}"></div>
-    <div class="htfsec">FlowDesk confirmation</div>
-    ${ck('confirm', 'Check each signal with order-flow data (✓ / ✕)')}${ck('hideWeak', 'Hide signals that are not confirmed')}
-    <div class="htfline"><span>Candle checks needed</span><select data-g="minHist">${opt([[2, '2 of 4'], [3, '3 of 4'], [4, '4 of 4']], c.minHist)}</select><span></span><span></span></div>
-    ${ck('box', 'Status box')}${ck('alerts', 'Pop-up alerts (BUY / SELL, entry-line touches)')}
+    <div class="htfsec">FINAL signal · FlowDesk tools</div>
+    ${ck('confirm', 'Confirm every signal with FlowDesk data (FINAL ✓)')}${ck('hideWeak', 'Show only FINAL signals')}
+    <div class="htfline"><span>Candle score needed %</span><input type="number" min="0" max="100" data-g="minScore" value="${c.minScore}"><span>Live score needed %</span><input type="number" min="0" max="100" data-g="minLive" value="${c.minLive}"></div>
+    <div class="htfline"><span>Backtest hold (candles)</span><input type="number" min="1" max="100" data-g="hold" value="${c.hold}"><span></span><span></span></div>
+    ${ck('box', 'Status box')}${ck('alerts', 'Pop-up alerts')}
     <div class="vbtns"><button data-a="reset">Reset to defaults</button></div>
-    <div class="muted sm" style="margin-top:8px">Hover a BUY / SELL label to see which checks passed. Live order-flow checks are saved the moment a signal appears, so they never change later.</div>`;
+    <div class="muted sm" style="margin-top:8px">Hover a BUY / SELL label to see every check. Raise the score needed if the backtest shows FINAL signals are not better than all flips.</div>`;
   const read = () => {
     const n = Z.cfg();
-    pop.querySelectorAll('[data-g]').forEach(inp => { const f = inp.dataset.g; n[f] = inp.type === 'checkbox' ? inp.checked : inp.type === 'number' ? Math.max(0, +inp.value || 0) : (f === 'minHist' ? +inp.value : inp.value); });
-    n.smooth = Math.max(1, Math.round(n.smooth)); Z.save(n);
+    pop.querySelectorAll('[data-g]').forEach(inp => { const f = inp.dataset.g; n[f] = inp.type === 'checkbox' ? inp.checked : inp.type === 'number' ? Math.max(0, +inp.value || 0) : inp.value; });
+    n.smooth = Math.max(1, Math.round(n.smooth)); n.hold = Math.max(1, Math.round(n.hold)); Z.save(n);
   };
   pop.querySelectorAll('input,select').forEach(i => { i.onchange = read; if (i.type === 'color' || i.type === 'number') i.oninput = read; });
   pop.querySelector('.cpx').onclick = () => pop.remove();
@@ -395,5 +435,7 @@ Z.panel = function (anchor) {
   setTimeout(() => document.addEventListener('pointerdown', function f(e) { if (!pop.contains(e.target) && e.target !== anchor) { pop.remove(); document.removeEventListener('pointerdown', f); } }), 0);
 };
 
+// keep checking for new signals (and alerts) even when the chart tab is not open
+setInterval(() => { try { if (OF.S && OF.S.info && Z.cfg().on) Z.calc(); } catch (e) { console.error(e); } }, 30000);
 OF.on('info', () => { Z._c = null; OF.loadKlines('1d'); });
 })();

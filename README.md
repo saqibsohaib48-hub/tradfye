@@ -97,4 +97,4 @@ The code for all of this is in `js/edge.js`.
 
 ## S1+S2 indicator (Chart tab)
 
-Port of the "Combined Session 1 & Session 2" Pine script (`js/s12.js`). Same colours, labels and lines; timeframe is selectable (1h, 4h, 1D, 1430 min, 1W, 1M). Signals use closed higher-timeframe candles only (no repaint), and every BUY / SELL is checked with order-flow data (✓ confirmed / ✕ not). Settings: ⚙ next to the S1+S2 toggle.
+Port of the "Combined Session 1 & Session 2" Pine script (`js/s12.js`). Same colours, labels and lines. It is calculated on its own timeframe only (1h, 4h, 1D, 1430 min, 1W, 1M — fixed, independent of the chart timeframe) from closed candles (no repaint). Each colour flip is scored with FlowDesk data (candle checks at the close + live tools for fresh signals); only flips that pass become FINAL BUY ✓ / SELL ✓. The status box shows a backtest of all flips vs FINAL signals. Settings: ⚙ next to the S1+S2 toggle.
