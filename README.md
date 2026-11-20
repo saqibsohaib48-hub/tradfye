@@ -27,6 +27,9 @@ The **Meme coins** tab (rocket icon) finds every meme coin listed on Binance: Co
 
 **Pump score (0–100):** trend (price vs its 200- and 50-day averages, 50-day slope) is absolute; 90-day and 30-day momentum, volume growth, buyer share and base/breakout are ranked against the other memes. Weights are in `js/meme.js` → `W`. Penalties: +150% in 30 days, under 120 days old, thin volume, crowded funding. **Dump risk** adds plain red flags. A meme season gauge (share of memes above their long average, memes vs Bitcoin over 30 days) sits on top. Daily data only; meme coins can lose 90%+; the score test only sees coins that still trade (survivorship bias). Not financial advice.
 
+## TradingView indicator
+`tradingview/FlowDesk_Planner.pine` brings the Trade plan engine to TradingView: the same factors, family rules, zones, entry, stop and targets, the same candle-close confirmation, and a tracker that draws `#1 SHORT entry (waiting) …`, stop, TP1 and TP2 on the chart. It includes the HTF S/R + Weekly Bias levels. Order-book, whale, liquidation and options data are replaced by Pine proxies. See `tradingview/README.md` for how to install it and how it maps to the tool.
+
 ## Gold and silver
 Open the symbol menu (top-left) → **Metals**:
 - **Gold · XAUUSDT** and **Silver · XAGUSDT**: Binance USDⓈ-M TradFi perpetuals (launched January 2026, trade 24/7, settled in USDT). Order book, trades, funding, open interest and liquidations all come from Binance futures, using the websocket paths Binance requires since 2026-04-23 (`wss://fstream.binance.com/public` for the book and best bid/ask, `/market` for trades and liquidations). The underlying metal market closes at weekends and holidays; the perpetual keeps trading and its index price pauses at the last value.
@@ -91,3 +94,7 @@ The code for all of this is in `js/edge.js`.
 - `js/metrics.js` → `WEIGHTS` and `OF.verdictFrom()` decide how the Decision panel turns meters into BUY / SELL / WAIT.
 - `js/core.js` → `housekeeping()` sets the adaptive whale size (99.5th percentile) and L3 size floor.
 - `js/edge.js` → `E.combine()` (family agreement), `E.regime()` (market type), `E.gate()` (cost and market-type rules), `E.breakoutOK()`, `E.detectSweep()`.
+
+## S1+S2 indicator (Chart tab)
+
+Port of the "Combined Session 1 & Session 2" Pine script (`js/s12.js`). Same colours, labels and lines; timeframe is selectable (1h, 4h, 1D, 1430 min, 1W, 1M). Signals use closed higher-timeframe candles only (no repaint), and every BUY / SELL is checked with order-flow data (✓ confirmed / ✕ not). Settings: ⚙ next to the S1+S2 toggle.

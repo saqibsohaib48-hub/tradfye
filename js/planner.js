@@ -56,6 +56,8 @@ function buildPlan(dir, px, atr, sup, res, c) {
   const tp2z = tz.find(z => beyond(z) && strong(z)) || tz.find(beyond);
   let tp2 = tp2z ? edge(tp2z) : entry + dir * risk * c.tp2R;
   if (Math.abs(tp2 - entry) > atr * c.tp2Cap) tp2 = entry + dir * risk * c.tp2R;
+  // TP2 must lie beyond TP1 (the 3R fallback could land before a far TP1 when the stop is tight)
+  if ((tp2 - tp1) * dir < atr * c.step) tp2 = tp1 + dir * Math.max(atr * c.step, risk);
   const blocker = far.find(z => strong(z) && (dir > 0 ? z.lo > entry && z.lo < tp1 : z.hi < entry && z.hi > tp1));
   return { dir, entry, eType, stop, risk, tp1, tp2, rr1: Math.abs(tp1 - entry) / risk, rr2: Math.abs(tp2 - entry) / risk, base, tp1z, tp2z, blocker,
     trigger: dir > 0 ? (res[0] ? res[0].hi : px + atr) : (sup[0] ? sup[0].lo : px - atr) };

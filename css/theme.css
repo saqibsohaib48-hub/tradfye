@@ -296,3 +296,4 @@ body.chartonly .mmchart{flex:1;height:auto!important;margin:0;border:0;border-ra
 #mmLog .plev{margin-top:6px}
 @media (max-width:1300px){#mmLog .plcards{grid-template-columns:1fr 1fr}}
 #mmLog .plcards.two{grid-template-columns:1fr 1fr}
+.s12pop{max-height:calc(100vh - 24px);overflow:auto}
