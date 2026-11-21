@@ -2,8 +2,8 @@
 (function () {
 'use strict';
 const OF = window.OF, C = OF.C, el = OF.el, ui = OF.ui, LS = OF.LS, $ = id => document.getElementById(id);
-const ORDER = ['chart', 'heatmap', 'footprint', 'whales', 'profile', 'tpo', 'gamma', 'tape', 'liquidity', 'futures', 'sentiment', 'plan', 'meme', 'guide'];
-OF.app = { tf: LS.get('tf', '1m'), lines: Object.assign({ plan: true, gamma: false, liq: true, walls: true, key: true }, LS.get('lines', {})), view: LS.get('view', 'heatmap'), panel: LS.get('panel', window.innerWidth > 1000) };
+const ORDER = ['chart', 'heatmap', 'footprint', 'whales', 'profile', 'tpo', 'gamma', 'tape', 'liquidity', 'futures', 'sentiment', 'plan', 'guide'];
+OF.app = { tf: LS.get('tf', '1m'), lines: Object.assign({ plan: true, gamma: false, liq: true, walls: true, key: true, swing: true }, LS.get('lines', {})), view: LS.get('view', 'heatmap'), panel: LS.get('panel', window.innerWidth > 1000) };
 const A = OF.app;
 
 /* ---------- header ---------- */
@@ -13,7 +13,7 @@ function buildHeader() {
   const ls = $('linesSeg'); ls.innerHTML = '';
   const g = el('div', 'grp'); g.appendChild(el('span', 'lbl', 'Lines'));
   const s = el('div', 'seg');
-  [['key', '★ Key', 'Auto-highlighted key support / resistance where several sources agree'], ['plan', 'Plan', 'Decision panel trigger levels'], ['walls', 'Walls', 'Biggest resting bid / ask walls in the order book (±3%) with price and size'], ['liq', 'Liq', 'Estimated liquidation clusters with price and size'], ['gamma', 'Γ', 'Options gamma levels (Deribit)']].forEach(([k, t, title]) => {
+  [['key', '★ Key', 'Auto-highlighted key support / resistance where several sources agree'], ['swing', 'Swings', 'Swing highs and lows (HH / HL / LH / LL) on the candle charts, with breaks of structure'], ['plan', 'Plan', 'Decision panel trigger levels'], ['walls', 'Walls', 'Biggest resting bid / ask walls in the order book (±3%) with price and size'], ['liq', 'Liq', 'Estimated liquidation clusters with price and size'], ['gamma', 'Γ', 'Options gamma levels (Deribit)']].forEach(([k, t, title]) => {
     const b = el('button', A.lines[k] ? 'on' : '', t); b.title = title;
     b.onclick = () => { A.lines[k] = !A.lines[k]; b.classList.toggle('on', A.lines[k]); LS.set('lines', A.lines); if (k === 'gamma' && A.lines[k]) OF.loadGamma(); };
     s.appendChild(b);
@@ -36,9 +36,7 @@ function renderSyms() {
   const met = (OF._metals || Object.entries(OF.METALS).map(([symbol, m]) => ({ symbol, base: symbol.slice(0, -4), name: m.name, metal: m.sym, note: m.note, last: null, chg: 0 })))
     .filter(m => !q || (m.base + ' ' + m.name + ' GOLD SILVER METAL').toUpperCase().includes(q));
   const metHtml = met.length ? `<div class="mhead">Metals</div>` + met.map(m => `<div class="srow metal" data-s="${m.symbol}"><b><span class="mcoin ${m.metal === 'Ag' ? 'ag' : 'au'}">${m.metal}</span>${m.name} <small>${m.base}</small></b><span class="mono">${m.last != null ? m.last : ''}</span><span class="mono ${m.chg >= 0 ? 'g' : 'r'}">${m.last != null ? (m.chg >= 0 ? '+' : '') + m.chg.toFixed(2) + '%' : ''}</span><div class="mnote">${m.note}</div></div>`).join('') + `<div class="mhead">Crypto</div>` : '';
-  const memes = LS.get('memesyms', []).filter(m => !q || (m.sym + ' ' + m.name + ' MEME').toUpperCase().includes(q)).slice(0, q ? 20 : 8);
-  const memeHtml = memes.length ? `<div class="mhead">Meme coins <small>(full list: Meme coins tab)</small></div>` + memes.map(m => `<div class="srow memer" data-s="${m.symbol}"><b>🐸 ${m.sym} <small>${m.name}${m.mkt === 'fut' ? ' · perp' : ''}</small></b><span></span><span></span></div>`).join('') : '';
-  $('symList').innerHTML = (rec.length && !q ? '<div class="rec">' + rec.map(s => `<button data-s="${s}">${s.replace(/USDT$/, '')}</button>`).join('') + '</div>' : '') + metHtml.replace(/<div class="mhead">Crypto<\/div>$/, '') + memeHtml + (metHtml || memeHtml ? '<div class="mhead">Crypto</div>' : '') +
+  $('symList').innerHTML = (rec.length && !q ? '<div class="rec">' + rec.map(s => `<button data-s="${s}">${s.replace(/USDT$/, '')}</button>`).join('') + '</div>' : '') + metHtml +
     (OF._mktErr && !list.length ? '<div class="muted pad">Could not load the crypto list — gold and silver above still work.</div>' : '') + (list.length ? list.map(m => `<div class="srow" data-s="${m.symbol}"><b>${m.base}</b><span class="mono">${m.last}</span><span class="mono ${m.chg >= 0 ? 'g' : 'r'}">${m.chg >= 0 ? '+' : ''}${m.chg.toFixed(2)}%</span></div>`).join('') : '<div class="muted pad">Loading markets…</div>');
   $('symList').querySelectorAll('[data-s]').forEach(x => x.onclick = () => pick(x.dataset.s));
 }
@@ -49,8 +47,7 @@ function pick(sym) {
 }
 function startSymbol(sym) {
   const metal = OF.METALS[sym];
-  const meme = !metal && LS.get('memesyms', []).find(m => m.symbol === sym);
-  $('symBtn').textContent = (metal ? metal.name.toUpperCase() + ' · ' : meme ? '🐸 ' : '') + sym.replace(/USDT$/, '/USDT') + (OF.isFut(sym) && !metal ? ' · PERP' : '') + ' ▾';
+  $('symBtn').textContent = (metal ? metal.name.toUpperCase() + ' · ' : '') + sym.replace(/USDT$/, '/USDT') + ' ▾';
   $('coin').textContent = metal ? metal.sym : sym.replace(/USDT$/, '').slice(0, 1);
   $('coin').className = 'coin' + (metal ? (metal.sym === 'Ag' ? ' ag' : ' au') : '');
   OF.start(sym).then(() => { if (!OF.S.info) return; ['1m', '5m', '15m', '30m', '1h', '4h', '12h', '1d'].forEach(tf => OF.loadKlines(tf)); });
@@ -92,10 +89,9 @@ const TABICON = {
   futures: svg('<path d="M3 17l6-6 4 4 8-8"/><path d="M15 7h6v6"/>'),
   sentiment: svg('<path d="M4 16a8 8 0 0 1 16 0"/><path d="M12 16l4-5"/><circle cx="12" cy="16" r="1.4"/>'),
   plan: svg('<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/>'),
-  meme: svg('<path d="M12 2c3 2.5 4.5 6 4.5 10v4.5h-9V12C7.5 8 9 4.5 12 2z"/><circle cx="12" cy="10" r="1.6"/><path d="M7.5 14.5L5 17.5v2.5l2.5-1M16.5 14.5L19 17.5v2.5l-2.5-1M10 19.5l2 2.5 2-2.5"/>'),
   guide: svg('<path d="M5 4h10a4 4 0 0 1 4 4v12H9a4 4 0 0 1-4-4z"/><path d="M5 16a4 4 0 0 1 4-4h10"/>')
 };
-const TABSHORT = { profile: 'Profile', liquidity: 'L3', plan: 'Trade plan', meme: 'Meme coins' };
+const TABSHORT = { profile: 'Profile', liquidity: 'L3', plan: 'Trade plan' };
 function buildTabs() {
   const t = $('tabs'); t.innerHTML = '';
   ORDER.forEach((id, i) => {
@@ -105,8 +101,6 @@ function buildTabs() {
   });
 }
 OF.app.remount = () => mountView();
-OF.app.pick = s => pick(s);
-OF.app.setView = id => setView(id);
 function setView(id) { A.view = id; LS.set('view', id); buildTabs(); mountView(); }
 let cur = null;
 function mountView() {
@@ -116,7 +110,7 @@ function mountView() {
   if (v.c) v.c = null;
   v.toolbar && v.toolbar(tb); v.mount(box); cur = v;
   $('reading').innerHTML = ''; $('reading').style.display = v.reading ? '' : 'none';
-  fsButton(); if (noChart() && document.body.classList.contains('chartonly')) chartOnly(false);
+  fsButton(); if (NOCHART[A.view] && document.body.classList.contains('chartonly')) chartOnly(false);
   ui.tip();
   tick(true);
 }
@@ -224,9 +218,8 @@ function applyHide() { const h = LS.get('hide', {}); HIDE.forEach(([k]) => docum
 function setFull(on) { const h = {}; if (on) HIDE.forEach(([k]) => { if (k !== 'tb') h[k] = true; }); LS.set('hide', h); A.panel = !on; applyPanel(); applyHide(); }
 /* ---------- full screen chart: only the chart, nothing else ---------- */
 const NOCHART = { tape: 1, liquidity: 1, sentiment: 1, guide: 1 };     // views without a chart to enlarge
-const noChart = () => !!(NOCHART[A.view] || (OF.views[A.view] && OF.views[A.view].noChart && OF.views[A.view].noChart()));
 function chartOnly(on) {
-  if (on && noChart()) return;
+  if (on && NOCHART[A.view]) return;
   document.body.classList.toggle('chartonly', !!on);
   document.body.classList.remove('fstools');
   if (on) { const d = document.documentElement; if (!document.fullscreenElement && d.requestFullscreen) d.requestFullscreen().catch(() => {}); }
@@ -235,11 +228,9 @@ function chartOnly(on) {
 }
 OF.app.chartOnly = chartOnly;
 document.addEventListener('fullscreenchange', () => { if (!document.fullscreenElement && document.body.classList.contains('chartonly')) chartOnly(false); setTimeout(() => tick(true), 50); });
-function fsButton() { $('fsBtn').style.display = noChart() ? 'none' : ''; }
+function fsButton() { $('fsBtn').style.display = NOCHART[A.view] ? 'none' : ''; }
 function fsBar() {
   if (!document.body.classList.contains('chartonly') || !OF.S) return;
-  const v = OF.views[A.view], L = v && v.fsLabel ? v.fsLabel() : null;   // views that chart another coin (Meme coins) name it themselves
-  if (L) { $('fsSym').textContent = L.name; $('fsPx').textContent = L.price; return; }
   const m = OF.METALS && OF.METALS[OF.S.symbol];
   $('fsSym').textContent = (m ? m.name.toUpperCase() + ' · ' : '') + OF.S.symbol.replace(/USDT$/, '/USDT') + ' · ' + OF.views[A.view].label;
   $('fsPx').textContent = OF.fp(OF.S.last);

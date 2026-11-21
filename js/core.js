@@ -20,8 +20,7 @@ OF.METALS = {
   XAGUSDT: { name: 'Silver', sym: 'Ag', mkt: 'fut', note: 'Binance silver perpetual (XAG) · 24/7' },
   PAXGUSDT: { name: 'Gold token', sym: 'Au', mkt: 'spot', note: 'PAX Gold on Binance spot (1 token = 1 oz gold)' }
 };
-/* futures-only symbols (gold, silver, and meme coins Binance lists only as perpetuals — remembered by js/meme.js) */
-OF.isFut = sym => !!((OF.METALS[sym] && OF.METALS[sym].mkt === 'fut') || (OF.FUTONLY || (OF.FUTONLY = OF.LS.get('futonly', {})))[sym]);
+OF.isFut = sym => !!(OF.METALS[sym] && OF.METALS[sym].mkt === 'fut');
 
 /* ---------- small helpers ---------- */
 OF.LS = {
@@ -607,7 +606,7 @@ OF.loadMetals = async function () {
   await Promise.all(Object.entries(OF.METALS).map(async ([symbol, m]) => {
     try {
       const r = await OF.getJ((m.mkt === 'fut' ? '/fapi/v1' : '/api/v3') + '/ticker/24hr?symbol=' + symbol, m.mkt === 'fut' ? [FAPI] : SPOT_REST);
-      const last = +r.lastPrice, open = +r.openPrice; out.push({ symbol, base: symbol.slice(0, -4), name: m.name, metal: m.sym, note: m.note, last: isFinite(last) && last > 0 ? last : null, chg: isFinite(last / open) ? (last / open - 1) * 100 : 0 });
+      out.push({ symbol, base: symbol.slice(0, -4), name: m.name, metal: m.sym, note: m.note, last: +r.lastPrice, chg: (+r.lastPrice / +r.openPrice - 1) * 100 });
     } catch (e) { out.push({ symbol, base: symbol.slice(0, -4), name: m.name, metal: m.sym, note: m.note, last: null, chg: 0 }); }
   }));
   OF._metals = Object.keys(OF.METALS).map(s => out.find(x => x.symbol === s));

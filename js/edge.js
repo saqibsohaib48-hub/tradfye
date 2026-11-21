@@ -103,7 +103,7 @@ E.targets = function (dir, entry, risk, sup, res, atr) {
   if (Math.abs(tp1 - entry) > risk * 3) { tp1 = entry + dir * risk * 1.5; tp1z = null; }
   let tp2z = tz.find(z => (edge(z) - tp1) * dir > atr * 0.3) || null, tp2 = tp2z ? edge(tp2z) : entry + dir * risk * 3;
   if (Math.abs(tp2 - entry) > risk * 6) { tp2 = entry + dir * risk * 3; tp2z = null; }
-  if ((tp2 - tp1) * dir < atr * 0.3) { tp2 = tp1 + dir * Math.max(atr * 0.3, risk); tp2z = null; }
+  if ((tp2 - tp1) * dir < risk * 0.5) { tp2 = tp1 + dir * risk * 1.5; tp2z = null; }   // TP2 must always be beyond TP1
   return { tp1, tp2, tp1z, tp2z };
 };
 E.sweepPlan = function (sw, entry, c, atr, sup, res, fee) {

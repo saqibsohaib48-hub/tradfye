@@ -17,18 +17,13 @@ Neon Pulse theme (`css/theme.css`, loaded after `css/style.css`): left icon menu
 
 That code is licensed **CC BY-NC-SA 4.0** (https://creativecommons.org/licenses/by-nc-sa/4.0/): keep the attribution, share changes under the same licence, and do not use it commercially.
 
-## Meme coins (long-term)
-The **Meme coins** tab (rocket icon) finds every meme coin listed on Binance: CoinGecko's free *meme-token* category (top 250 by market cap) is matched to Binance by **price**, so look-alike tickers are dropped; spot pairs are preferred, perpetual-futures pairs are used when there is no spot pair (including "1000×" pairs). If CoinGecko is unreachable a built-in list of ~40 memes is used instead. Five views:
-- **📋 All meme coins** – price, 24h / 7d / 30d / 90d, 90-day sparkline, volume and volume trend, market cap, distance from the 1-year high, funding, pump score, dump risk and signal. ▶ opens the coin in every terminal tab.
-- **🚀 Pump / dump radar** – the 10 highest scores in an uptrend and the 10 highest dump risks, each with the reasons.
-- **📈 Long-term plans** – three buys (30/30/40%) at real supports (50/200-day averages, 30/90-day and 1-year lows), a stop on a *weekly close* below buy 3 (or the 1-year low when it is close), three targets (90-day high, 1-year high, all-time high) selling a third at each, and a size from your capital, risk % and max % per coin (⚙ Settings). Drawn on a daily log-scale chart.
-- **💼 My investments** – tracked plans followed day by day: buys filled, targets reached (stop to break-even after target 1), weekly-close stop, P&L.
-- **🧪 Score test** – the score replayed every week on history: next 30/90-day moves by score rank, band and signal, and the top 5 vs all memes.
+## Swing highs and lows
+**Lines → Swings** (on by default) marks confirmed swing highs and lows on the Chart, Whales and Trade plan charts, labelled HH / LH / HL / LL, with dotted lines that run until a candle closes through them (BOS) and SH / SL price tags for the nearest swing high and low that still hold. A badge shows the structure (uptrend, downtrend or range). Set the swing length (3, 5, 10, 20 candles each side) on the Chart toolbar. Code: `js/swings.js`.
 
-**Pump score (0–100):** trend (price vs its 200- and 50-day averages, 50-day slope) is absolute; 90-day and 30-day momentum, volume growth, buyer share and base/breakout are ranked against the other memes. Weights are in `js/meme.js` → `W`. Penalties: +150% in 30 days, under 120 days old, thin volume, crowded funding. **Dump risk** adds plain red flags. A meme season gauge (share of memes above their long average, memes vs Bitcoin over 30 days) sits on top. Daily data only; meme coins can lose 90%+; the score test only sees coins that still trade (survivorship bias). Not financial advice.
+## Swing Structure Bands [ChartPrime]
+`js/ssbands.js` is a JavaScript port of the TradingView indicator “Swing Structure Bands [ChartPrime]” with the same inputs, defaults (Swing Length 100, SMA, Bands on) and colours (bear fuchsia #E040FB, bull green #4CAF50): top and bottom swing bands with ±ATR(200) gradient clouds, band breaks, Swing High / Swing Low labels and buy / sell diamonds. Turn it on with **Swing Bands** on the Chart tab; ⚙ opens the settings. It is also drawn on the Trade plan chart. TradingView calculates from the first bar of its history; here the calculation runs on the candles loaded for the timeframe (up to 1,000), so the right-hand part of the chart matches.
 
-## TradingView indicator
-`tradingview/FlowDesk_Planner.pine` brings the Trade plan engine to TradingView: the same factors, family rules, zones, entry, stop and targets, the same candle-close confirmation, and a tracker that draws `#1 SHORT entry (waiting) …`, stop, TP1 and TP2 on the chart. It includes the HTF S/R + Weekly Bias levels. Order-book, whale, liquidation and options data are replaced by Pine proxies. See `tradingview/README.md` for how to install it and how it maps to the tool.
+That code is © ChartPrime and licensed under the **Mozilla Public License 2.0** (https://mozilla.org/MPL/2.0/): keep the notice at the top of `js/ssbands.js`, and share changes to that file under the same licence.
 
 ## Gold and silver
 Open the symbol menu (top-left) → **Metals**:
@@ -94,7 +89,3 @@ The code for all of this is in `js/edge.js`.
 - `js/metrics.js` → `WEIGHTS` and `OF.verdictFrom()` decide how the Decision panel turns meters into BUY / SELL / WAIT.
 - `js/core.js` → `housekeeping()` sets the adaptive whale size (99.5th percentile) and L3 size floor.
 - `js/edge.js` → `E.combine()` (family agreement), `E.regime()` (market type), `E.gate()` (cost and market-type rules), `E.breakoutOK()`, `E.detectSweep()`.
-
-## S1+S2 indicator (Chart tab)
-
-Port of the "Combined Session 1 & Session 2" Pine script (`js/s12.js`). Same colours, labels and lines. It is calculated on its own timeframe only (1h, 4h, 1D, 1430 min, 1W, 1M — fixed, independent of the chart timeframe) from closed candles (no repaint). Each colour flip is scored with FlowDesk data (candle checks at the close + live tools for fresh signals); only flips that pass become FINAL BUY ✓ / SELL ✓. The status box shows a backtest of all flips vs FINAL signals. Settings: ⚙ next to the S1+S2 toggle.

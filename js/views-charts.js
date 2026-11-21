@@ -342,10 +342,11 @@ OF.views.chart = {
       ui.toggle('RSI 14', o.rsi, v => { o.rsi = v; save(); }), ui.toggle('VWAP', o.vwap, v => { o.vwap = v; save(); }),
       el('span', 'lbl', 'Overlays'),
       ui.toggle('Whales', o.whales, v => { o.whales = v; save(); }), ui.toggle('Gamma', o.gamma, v => { o.gamma = v; save(); if (v) OF.loadGamma(); }),
-      ui.toggle('HTF S/R', OF.htfsr.cfg().on, v => OF.htfsr.toggle(v), 'HTF Support/Resistance + Weekly Bias Filter (BigBeluga)'));
-    const gear = el('button', 'tgl htfgear', '⚙'); gear.title = 'HTF S/R settings'; gear.onclick = () => OF.htfsr.panel(gear); tb.append(gear);
-    tb.append(ui.toggle('S1+S2', OF.s12.cfg().on, v => OF.s12.toggle(v), 'Combined Session 1 & Session 2 — daily-close colour, BUY/SELL and weighted entry lines, confirmed with order flow'));
-    const gear2 = el('button', 'tgl htfgear', '⚙'); gear2.title = 'S1+S2 settings (timeframe, lines, confirmation)'; gear2.onclick = () => OF.s12.panel(gear2); tb.append(gear2, el('span', 'lbl', 'Draw'));
+      ui.toggle('HTF S/R', OF.htfsr.cfg().on, v => OF.htfsr.toggle(v), 'HTF Support/Resistance + Weekly Bias Filter (BigBeluga)'),
+      ui.seg('Swing', [[3, '3'], [5, '5'], [10, '10'], [20, '20']], OF.swings.cfg().len, v => OF.swings.set('len', +v), 'Swing length: a swing high must be above this many candles on each side. Bigger = fewer, more important swings. A swing is confirmed this many candles after it. Turn swings on/off with Lines → Swings.'));
+    const gear = el('button', 'tgl htfgear', '⚙'); gear.title = 'HTF S/R settings'; gear.onclick = () => OF.htfsr.panel(gear);
+    const gear2 = el('button', 'tgl htfgear', '⚙'); gear2.title = 'Swing Structure Bands settings'; gear2.onclick = () => OF.ssbands.panel(gear2);
+    tb.append(gear, ui.toggle('Swing Bands', OF.ssbands.cfg().on, v => OF.ssbands.toggle(v), 'Swing Structure Bands [ChartPrime]'), gear2, el('span', 'lbl', 'Draw'));
     const tools = el('div', 'seg');
     [['trend', '╱ Line'], ['hline', '— Level'], ['clear', '🗑']].forEach(([k, t]) => {
       const b = el('button', '', t);
@@ -399,10 +400,7 @@ OF.views.chart = {
     // volume
     let vmx = 0; for (let i = i0; i < end; i++) vmx = Math.max(vmx, k[i].qv);
     for (let i = i0; i < end; i++) { const h = k[i].qv / vmx * volH; ctx.fillStyle = k[i].c >= k[i].o ? 'rgba(34,197,94,.35)' : 'rgba(239,68,68,.35)'; ctx.fillRect(X(i) - bw * 0.35, mainH - h, Math.max(1, bw * 0.7), h); }
-    const g12 = { k, i0, end, X, Y, lo, hi, pw, bw, ms, top: 0, bottom: mainH - volH };
-    OF.s12.drawBg(ctx, g12);
     OF.drawCandles(ctx, k, i0, end, X, Y, bw * 0.7);
-    OF.s12.draw(ctx, g12);
     const line = (vals, col) => { ctx.shadowColor = col; ctx.shadowBlur = 8; ctx.strokeStyle = col; ctx.lineWidth = 1.6; ctx.beginPath(); let s = false; for (let i = i0; i < end; i++) { if (vals[i] == null) continue; const y = Y(vals[i]); s ? ctx.lineTo(X(i), y) : ctx.moveTo(X(i), y); s = true; } ctx.stroke(); ctx.lineWidth = 1; ctx.shadowBlur = 0; };
     const legend = [];
     if (o.ema21) { line(OF.ema(k, 21), C.blue); legend.push([C.blue, 'EMA 21']); }
@@ -420,6 +418,8 @@ OF.views.chart = {
     if (OF.app.lines.walls) OF.drawWallLines(ctx, pw, Y, lo, hi);
     OF.drawKeyLevels(ctx, 0, pw, Y, lo, hi);
     OF.htfsr.draw(ctx, { k, i0, end, X, Y, lo, hi, pw, bw, ms, top: 10, bottom: mainH - volH });
+    OF.ssbands.draw(ctx, { k, i0, end, X, Y, pw, top: 10, bottom: mainH - volH });
+    OF.swings.draw(ctx, { k, i0, end, X, Y, lo, hi, pw, top: 28, bottom: mainH - volH });
     // drawings
     const draws = LS.get('draw:' + S.symbol, []).concat(this.draft ? [this.draft] : []);
     ctx.strokeStyle = '#e5e7eb'; ctx.lineWidth = 1.2;
@@ -452,7 +452,6 @@ OF.views.chart = {
       const p = fi(f(lo) + ((mainH - volH) - this.mouse.y) / (mainH - volH - 10) * (f(hi) - f(lo))); ui.tag(ctx, pw + 1, this.mouse.y, OF.fp(p), '#2563eb', '#fff');
       if (S.last) { const dd = (p / S.last - 1) * 100; ctx.fillStyle = '#93c5fd'; ctx.textAlign = 'right'; ctx.textBaseline = 'bottom'; ctx.fillText((dd >= 0 ? '+' : '') + dd.toFixed(2) + '% from price', pw - 4, this.mouse.y - 3); ctx.textAlign = 'left'; ctx.textBaseline = 'top'; }
     }
-    if (this.mouse && this.mouse.y < mainH - volH) OF.s12.tip(ctx, g12, this.mouse);
     if (this.tool) { ctx.fillStyle = C.amber; ctx.fillText(this.tool === 'hline' ? 'Click to place a level' : (this.draft ? 'Click the second point' : 'Click the first point'), pw / 2 - 60, 6); }
     this.geo = { bw, tAt: x => tStart + (x / bw - 0.5 + 0.5) * ms, pAt: y => fi(f(lo) + ((mainH - volH) - y) / (mainH - volH - 10) * (f(hi) - f(lo))) };
   }
@@ -693,6 +692,7 @@ OF.views.whales = {
     if (OF.app.lines.liq) OF.drawLiqLines(ctx, pw, Y, lo, hi);
     if (OF.app.lines.walls) OF.drawWallLines(ctx, pw, Y, lo, hi);
     OF.drawKeyLevels(ctx, 0, pw, Y, lo, hi);
+    OF.swings.draw(ctx, { k, i0, end: k.length, X, Y, lo, hi, pw, top: 8, bottom: mainH - 8 });
     // whale volume by price on the right
     if (o.vp) {
       const zb = OF.niceStep((hi - lo) / 50), zm = new Map(); for (const w of d.list) { const kk = Math.floor(w.p / zb) * zb; const r = zm.get(kk) || [0, 0]; r[w.buy ? 0 : 1] += w.n; zm.set(kk, r); }

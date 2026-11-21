@@ -53,11 +53,10 @@ function buildPlan(dir, px, atr, sup, res, c) {
   let tp1 = tp1z ? edge(tp1z) : entry + dir * risk * c.tp1R;
   if (Math.abs(tp1 - entry) > atr * c.tp1Cap) tp1 = entry + dir * risk * c.tp1R;
   const beyond = z => dir > 0 ? edge(z) > tp1 + atr * c.step : edge(z) < tp1 - atr * c.step;
-  const tp2z = tz.find(z => beyond(z) && strong(z)) || tz.find(beyond);
+  let tp2z = tz.find(z => beyond(z) && strong(z)) || tz.find(beyond);
   let tp2 = tp2z ? edge(tp2z) : entry + dir * risk * c.tp2R;
   if (Math.abs(tp2 - entry) > atr * c.tp2Cap) tp2 = entry + dir * risk * c.tp2R;
-  // TP2 must lie beyond TP1 (the 3R fallback could land before a far TP1 when the stop is tight)
-  if ((tp2 - tp1) * dir < atr * c.step) tp2 = tp1 + dir * Math.max(atr * c.step, risk);
+  if ((tp2 - tp1) * dir < risk * 0.5) { tp2 = tp1 + dir * risk * 1.5; tp2z = null; }   // TP2 must always be beyond TP1
   const blocker = far.find(z => strong(z) && (dir > 0 ? z.lo > entry && z.lo < tp1 : z.hi < entry && z.hi > tp1));
   return { dir, entry, eType, stop, risk, tp1, tp2, rr1: Math.abs(tp1 - entry) / risk, rr2: Math.abs(tp2 - entry) / risk, base, tp1z, tp2z, blocker,
     trigger: dir > 0 ? (res[0] ? res[0].hi : px + atr) : (sup[0] ? sup[0].lo : px - atr) };
@@ -758,6 +757,8 @@ OF.views.plan = {
     });
     OF.drawKeyLevels(ctx, 0, pw, Y, lo, hi);
     OF.htfsr.draw(ctx, { k, i0, end, X, Y, lo, hi, pw, bw, ms, top: 6, bottom: ph - 6 });
+    OF.ssbands.draw(ctx, { k, i0, end, X, Y, pw, top: 6, bottom: ph - 6 });
+    OF.swings.draw(ctx, { k, i0, end, X, Y, lo, hi, pw, top: 6, bottom: ph - 6 });
     if (S.last) { ui.hline(ctx, 0, pw, Y(S.last), 'rgba(229,231,235,.5)', [1, 3]); ui.tag(ctx, pw + 1, Y(S.last), OF.fp(S.last), '#e5e7eb', '#000'); }
     ctx.font = '11px ui-monospace,monospace'; ctx.fillStyle = C.muted; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
     this.drawStage(ctx, pw, open, p);
