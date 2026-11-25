@@ -3,7 +3,7 @@
 'use strict';
 const OF = window.OF, C = OF.C, el = OF.el, ui = OF.ui, LS = OF.LS, $ = id => document.getElementById(id);
 const ORDER = ['chart', 'heatmap', 'footprint', 'whales', 'profile', 'tpo', 'gamma', 'tape', 'liquidity', 'futures', 'sentiment', 'plan', 'guide'];
-OF.app = { tf: LS.get('tf', '1m'), lines: Object.assign({ plan: true, gamma: false, liq: true, walls: true, key: true, swing: true }, LS.get('lines', {})), view: LS.get('view', 'heatmap'), panel: LS.get('panel', window.innerWidth > 1000) };
+OF.app = { tf: LS.get('tf', '1m'), lines: Object.assign({ plan: true, gamma: false, liq: true, walls: true, key: true, swing: true, pred: true }, LS.get('lines', {})), view: LS.get('view', 'heatmap'), panel: LS.get('panel', window.innerWidth > 1000) };
 const A = OF.app;
 
 /* ---------- header ---------- */
@@ -13,7 +13,7 @@ function buildHeader() {
   const ls = $('linesSeg'); ls.innerHTML = '';
   const g = el('div', 'grp'); g.appendChild(el('span', 'lbl', 'Lines'));
   const s = el('div', 'seg');
-  [['key', '★ Key', 'Auto-highlighted key support / resistance where several sources agree'], ['swing', 'Swings', 'Swing highs and lows (HH / HL / LH / LL) on the candle charts, with breaks of structure'], ['plan', 'Plan', 'Decision panel trigger levels'], ['walls', 'Walls', 'Biggest resting bid / ask walls in the order book (±3%) with price and size'], ['liq', 'Liq', 'Estimated liquidation clusters with price and size'], ['gamma', 'Γ', 'Options gamma levels (Deribit)']].forEach(([k, t, title]) => {
+  [['pred', '🔮 Next', 'Next-candle prediction: a yellow candle one step ahead with its confidence %, for the selected timeframe'], ['key', '★ Key', 'Auto-highlighted key support / resistance where several sources agree'], ['swing', 'Swings', 'Swing highs and lows (HH / HL / LH / LL) on the candle charts, with breaks of structure'], ['plan', 'Plan', 'Decision panel trigger levels'], ['walls', 'Walls', 'Biggest resting bid / ask walls in the order book (±3%) with price and size'], ['liq', 'Liq', 'Estimated liquidation clusters with price and size'], ['gamma', 'Γ', 'Options gamma levels (Deribit)']].forEach(([k, t, title]) => {
     const b = el('button', A.lines[k] ? 'on' : '', t); b.title = title;
     b.onclick = () => { A.lines[k] = !A.lines[k]; b.classList.toggle('on', A.lines[k]); LS.set('lines', A.lines); if (k === 'gamma' && A.lines[k]) OF.loadGamma(); };
     s.appendChild(b);

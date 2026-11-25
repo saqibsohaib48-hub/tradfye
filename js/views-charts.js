@@ -391,6 +391,7 @@ OF.views.chart = {
     const n = Math.min(this.view.n, k.length), end = Math.max(n, k.length - this.view.off), i0 = Math.max(0, end - n);
     const bw = pw / (n + 4), X = i => (i - i0 + 0.5) * bw;
     let lo = Infinity, hi = -Infinity; for (let i = i0; i < end; i++) { lo = Math.min(lo, k[i].l); hi = Math.max(hi, k[i].h); }
+    if (OF.app.lines.pred && !this.view.off && OF.predict) { const pr = OF.predict.calc(tf); if (pr) { lo = Math.min(lo, pr.l); hi = Math.max(hi, pr.h); } }   // keep the predicted candle on screen
     const pad = (hi - lo) * 0.08 || hi * 0.001; lo -= pad; hi += pad;
     const lg = o.scale === 'log', f = v => lg ? Math.log(v) : v, fi = v => lg ? Math.exp(v) : v;
     const volH = mainH * 0.16, Y = p => (mainH - volH) - (f(p) - f(lo)) / (f(hi) - f(lo)) * (mainH - volH - 10) ;
@@ -420,6 +421,7 @@ OF.views.chart = {
     OF.htfsr.draw(ctx, { k, i0, end, X, Y, lo, hi, pw, bw, ms, top: 10, bottom: mainH - volH });
     OF.ssbands.draw(ctx, { k, i0, end, X, Y, pw, top: 10, bottom: mainH - volH });
     OF.swings.draw(ctx, { k, i0, end, X, Y, lo, hi, pw, top: 28, bottom: mainH - volH });
+    OF.predict.draw(ctx, { k, end, X, Y, bw, tf, pw, top: 10, bottom: mainH - volH, mouse: this.mouse, cv: this.c.cv });
     // drawings
     const draws = LS.get('draw:' + S.symbol, []).concat(this.draft ? [this.draft] : []);
     ctx.strokeStyle = '#e5e7eb'; ctx.lineWidth = 1.2;

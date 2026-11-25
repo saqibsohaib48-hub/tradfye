@@ -694,6 +694,7 @@ OF.views.plan = {
     const bw = pw / (n + Math.max(6, n * 0.18)), X = i => (i - i0 + 0.5) * bw; this.bw = bw;
     const nxt = !F && this.o.sub !== 'open' && !open.length ? p.plan : null, lv = [], ideas = !F && !p.plan && !open.length ? rankIdeas(p) : [];
     ideas.forEach(r => lv.push(r.q.entry, r.q.stop, r.q.tp1));
+    const PR = OF.app.lines.pred && !this.zv.off && OF.predict ? OF.predict.calc(tf) : null; if (PR) lv.push(PR.h, PR.l);
     open.forEach(L => lv.push(L.entry, L.stopNow, L.tp1, L.tp2)); if (nxt) lv.push(nxt.entry, nxt.stop, nxt.tp1, nxt.tp2);
     let lo = Infinity, hi = -Infinity; for (let i = i0; i < end; i++) { lo = Math.min(lo, k[i].l); hi = Math.max(hi, k[i].h); }
     // include trade levels only if they are reasonably close; far ones become edge arrows (they used to flatten the candles)
@@ -759,6 +760,7 @@ OF.views.plan = {
     OF.htfsr.draw(ctx, { k, i0, end, X, Y, lo, hi, pw, bw, ms, top: 6, bottom: ph - 6 });
     OF.ssbands.draw(ctx, { k, i0, end, X, Y, pw, top: 6, bottom: ph - 6 });
     OF.swings.draw(ctx, { k, i0, end, X, Y, lo, hi, pw, top: 6, bottom: ph - 6 });
+    OF.predict.draw(ctx, { k, end, X, Y, bw, tf, pw, top: 6, bottom: ph - 6, mouse: this.mouse, cv: this.c.cv });
     if (S.last) { ui.hline(ctx, 0, pw, Y(S.last), 'rgba(229,231,235,.5)', [1, 3]); ui.tag(ctx, pw + 1, Y(S.last), OF.fp(S.last), '#e5e7eb', '#000'); }
     ctx.font = '11px ui-monospace,monospace'; ctx.fillStyle = C.muted; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
     this.drawStage(ctx, pw, open, p);

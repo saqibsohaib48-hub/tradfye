@@ -17,6 +17,13 @@ Neon Pulse theme (`css/theme.css`, loaded after `css/style.css`): left icon menu
 
 That code is licensed **CC BY-NC-SA 4.0** (https://creativecommons.org/licenses/by-nc-sa/4.0/): keep the attribution, share changes under the same licence, and do not use it commercially.
 
+## 🔮 Next-candle prediction
+**Lines → 🔮 Next** (on by default) draws a yellow candle one step ahead on the Chart and Trade plan charts, for whichever timeframe is selected, with its direction and a confidence %. Hover it for the breakdown.
+- **Direction** comes from the live readings, grouped into five families whose weight depends on the timeframe: order flow (trade flow over the last candle-length, aggression, CVD, candle delta, whales), order book (imbalance, walls, pulled walls), trend (multi-timeframe direction, key-points trend), structure and levels (swing structure, key support/resistance close by, Swing Structure Bands extremes) and futures (futures aggression and CVD, funding, open interest, liquidation magnet).
+- **Size** comes from that timeframe's typical body and ATR(14); key resistance / support caps the predicted high / low.
+- **Confidence:** the model % reflects how strong and consistent the readings are and stays below about 80 %. Every prediction is frozen when its candle starts and checked when it closes (kept per coin and timeframe in the browser; demo data kept separately). After 20 or more checks at a similar confidence, the shown % leans on the measured hit rate.
+Code: `js/predict.js`.
+
 ## Swing highs and lows
 **Lines → Swings** (on by default) marks confirmed swing highs and lows on the Chart, Whales and Trade plan charts, labelled HH / LH / HL / LL, with dotted lines that run until a candle closes through them (BOS) and SH / SL price tags for the nearest swing high and low that still hold. A badge shows the structure (uptrend, downtrend or range). Set the swing length (3, 5, 10, 20 candles each side) on the Chart toolbar. Code: `js/swings.js`.
 
